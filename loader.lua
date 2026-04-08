@@ -1,10 +1,5 @@
 --[[
-    DUMPER PRO v13 — Loader
-    Execute este script para iniciar.
-    
-    Estrutura:
-    src/init.lua → src/core.lua → src/decompile.lua
-                 → src/collect.lua → src/hooks.lua → src/output.lua
+    DUMPER PRO v13 — Loader (Optimized)
 ]]
 
 local BASE = "https://raw.githubusercontent.com/Spectro3n/DumperPro/main/src/"

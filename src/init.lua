@@ -1,43 +1,30 @@
 local BASE = ... or "https://raw.githubusercontent.com/Spectro3n/DumperPro/main/src/"
 
--- ══════════════════════════════════
---  LOAD UI
--- ══════════════════════════════════
-
+-- ══ LOAD UI ══
 local UI = loadstring(game:HttpGet(
     "https://raw.githubusercontent.com/Spectro3n/DumperUI/refs/heads/main/DumperUI.lua"
 ))()
 
--- ══════════════════════════════════
---  CONTEXT
--- ══════════════════════════════════
-
 local D = { UI = UI }
 
--- ══════════════════════════════════
---  MODULE LOADER (pcall cada módulo)
--- ══════════════════════════════════
-
+-- ══ MODULE LOADER ══
 local moduleStatus = {}
 
 local function loadMod(name, required)
     local ok, err = pcall(function()
-        local code = game:HttpGet(BASE .. name .. ".lua")
+        local code = game:HttpGet(BASE..name..".lua")
         local fn = loadstring(code)()
         fn(D)
     end)
     moduleStatus[name] = ok
     if not ok then
-        UI:Log("⚠ Module " .. name .. " failed: " .. tostring(err):sub(1, 80), "red")
-        if required then
-            UI:Log("CRITICAL — cannot continue without " .. name, "red")
-        end
+        UI:Log("⚠ Module "..name.." failed: "..tostring(err):sub(1,80), "red")
+        if required then UI:Log("CRITICAL — cannot continue without "..name, "red") end
     end
     task.wait(0.1)
     return ok
 end
 
--- Carregar em ordem (core/decompile/collect são obrigatórios)
 if not loadMod("core", true) then return end
 if not loadMod("decompile", true) then return end
 if not loadMod("collect", true) then return end
@@ -48,7 +35,7 @@ local C   = D.Core
 local has = D.has
 
 -- ══════════════════════════════════
---  PROCESSING ENGINE
+--  PROCESSING ENGINE — mode-adaptive
 -- ══════════════════════════════════
 
 local processingThread = nil
@@ -63,7 +50,7 @@ local function onDone()
 
     local stopped = D.S.cancel
     D.UI:SetBadge(stopped and "Stopped" or "Done", stopped and "red" or "green")
-    D.UI:SetProgress(D.S.stats.ok + D.S.stats.fail, math.max(D.S.stats.queued, 1))
+    D.UI:SetProgress(D.S.stats.ok+D.S.stats.fail, math.max(D.S.stats.queued,1))
     C.push()
 
     D.UI:Log("═══════════════════════════", "green")
@@ -72,18 +59,27 @@ local function onDone()
         D.S.stats.ok, D.S.stats.total,
         D.S.cacheStats.hits, D.S.stats.aggressive,
         C.elapsed()), "green")
-    D.UI:Log("Folder: " .. D.S.rootDir .. "/", "green")
+    D.UI:Log("Folder: "..D.S.rootDir.."/", "green")
     D.UI:Log("═══════════════════════════", "green")
 
-    D.UI:SetStatus("✓ " .. D.S.stats.ok .. "/" .. D.S.stats.total .. " · " .. C.elapsed())
+    D.UI:SetStatus("✓ "..D.S.stats.ok.."/"..D.S.stats.total.." · "..C.elapsed())
 end
 
 local function startProcessing()
     D.UI:SetPhase("decompiling")
-    D.UI:Log("Processing " .. #D.S.queue .. " scripts...", "blue")
+    D.UI:Log("Processing "..#D.S.queue.." scripts...", "blue")
+
+    local mode = D.cfg.mode or "normal"
+    local batchSize = D.limits.batchSize
+    local cacheHitBatch = D.limits.cacheHitBatch
+    local memCheckEvery = D.limits.memCheckEvery
+    local gcStep = D.limits.gcStepSize
+    local logEvery = mode == "turbo" and 20 or 10
 
     processingThread = task.spawn(function()
         local batch = 0
+        local cacheStreak = 0
+
         while #D.S.queue > 0 and not D.S.cancel do
             local entry = table.remove(D.S.queue, 1)
             local isCacheHit = entry.bcHash
@@ -93,23 +89,53 @@ local function startProcessing()
             D.Decompile.processOne(entry)
             batch = batch + 1
 
-            if batch % 10 == 0 then
+            -- Logging (throttled)
+            if batch % logEvery == 0 then
                 D.UI:Log(string.format("  %d/%d (%d cached, %d fail) %s",
-                    D.S.stats.ok + D.S.stats.fail, D.S.stats.queued,
+                    D.S.stats.ok+D.S.stats.fail, D.S.stats.queued,
                     D.S.cacheStats.hits, D.S.stats.fail, C.elapsed()), "gray")
             end
 
-            if isCacheHit then
-                if batch % 15 == 0 then task.wait() end
-            else
+            -- Yield strategy: mode-adaptive
+            if mode == "turbo" then
+                -- Turbo: cache hits are instant, process many before yielding
+                if isCacheHit then
+                    cacheStreak = cacheStreak + 1
+                    if cacheStreak >= cacheHitBatch then
+                        cacheStreak = 0
+                        task.wait()
+                    end
+                else
+                    cacheStreak = 0
+                    -- Non-cache: process batchSize before yielding
+                    if batch % batchSize == 0 then task.wait() end
+                end
+            elseif mode == "safe" then
+                -- Safe: ALWAYS yield between scripts
                 task.wait()
+                -- Extra memory safety
+                if batch % D.limits.memCheckEvery == 0 then
+                    if not C.memoryGuard() then
+                        D.UI:Log("⚠ Memory limit during decompile — saving what we have", "red")
+                        break
+                    end
+                end
+            else
+                -- Normal: balanced
+                if isCacheHit then
+                    if batch % (batchSize * 4) == 0 then task.wait() end
+                else
+                    if batch % batchSize == 0 then task.wait() end
+                end
             end
 
-            if batch % 20 == 0 then
-                pcall(collectgarbage, "step", 120)
+            -- Memory management (mode-adaptive frequency)
+            if batch % memCheckEvery == 0 then
+                pcall(collectgarbage, "step", gcStep)
                 C.memoryGuard()
             end
         end
+
         onDone()
         processingThread = nil
     end)
@@ -130,20 +156,29 @@ local function startDump()
     local mode = D.cfg.mode or "normal"
 
     D.UI:Log("═══════════════════════════", "blue")
-    D.UI:Log("DUMP PRO v13: " .. D.S.rootDir, "blue")
-    D.UI:Log("Mode: " .. mode:upper(), "blue")
-    D.UI:Log("Limits: yield=" .. D.limits.yieldEvery
-        .. " gc=" .. D.limits.gcLimit
-        .. " timeout=" .. D.limits.decompileTimeout .. "s", "blue")
-    D.UI:Log("Single file: " .. tostring(D.S.isSingleFile), "blue")
-    D.UI:Log("Cache: " .. (next(D.cache.bytecode) and "WARM" or "cold"), "blue")
-    D.UI:Log("Memory: " .. math.floor(C.getMemKB() / 1024) .. "MB", "blue")
+    D.UI:Log("DUMP PRO v13: "..D.S.rootDir, "blue")
+    D.UI:Log("Mode: "..mode:upper(), "blue")
+    D.UI:Log("Limits: yield="..D.limits.yieldEvery
+        .." gc="..D.limits.gcLimit
+        .." timeout="..D.limits.decompileTimeout.."s"
+        .." batch="..D.limits.batchSize, "blue")
+    D.UI:Log("Single file: "..tostring(D.S.isSingleFile), "blue")
+    D.UI:Log("Cache: "..(next(D.cache.bytecode) and "WARM" or "cold"), "blue")
+    D.UI:Log("Memory: "..math.floor(C.getMemKB()/1024).."MB", "blue")
 
     local mods = {}
-    for name, ok in pairs(moduleStatus) do
-        mods[#mods+1] = name .. (ok and "✓" or "✗")
+    for name, ok in pairs(moduleStatus) do mods[#mods+1] = name..(ok and "✓" or "✗") end
+    D.UI:Log("Modules: "..table.concat(mods," "), "blue")
+
+    -- Safe mode: extra info
+    if mode == "safe" then
+        D.UI:Log("★ SAFE: skipping GC/registry/threads/hooks/connections", "yellow")
+        D.UI:Log("★ SAFE: frequent yields, memory checks every "..D.limits.memCheckEvery.." items", "yellow")
+    elseif mode == "turbo" then
+        D.UI:Log("★ TURBO: max speed — batch="..D.limits.batchSize.." cacheHitBatch="..D.limits.cacheHitBatch, "yellow")
+        D.UI:Log("★ TURBO: yield every "..D.limits.yieldEvery.." items, chunk="..D.limits.chunkProcess, "yellow")
     end
-    D.UI:Log("Modules: " .. table.concat(mods, " "), "blue")
+
     D.UI:Log("═══════════════════════════", "blue")
 
     -- Collect
@@ -155,10 +190,10 @@ local function startDump()
         return
     end
 
-    -- Hooks (crash-safe, skip se módulo não carregou)
+    -- Hooks (skip in safe — enforced by hooks.lua)
     if D.Hooks and D.Hooks.analyze then
         C.memoryGuard()
-        task.wait(0.2)
+        task.wait(0.15)
         C.safeScan("Hooks", function() D.Hooks.analyze() end)
     end
 
@@ -201,13 +236,13 @@ UI.OnSaveInstance = function()
     D.UI:SetBadge("Saving", "yellow")
     task.spawn(function()
         local ok, err = pcall(saveinstance, {
-            ExcludePlayerGui = false, DecompileTimeout = 30,
-            NilInstances = true, RemovePlayerNames = true,
+            ExcludePlayerGui=false, DecompileTimeout=30,
+            NilInstances=true, RemovePlayerNames=true,
         })
         if ok then
             D.UI:Log("Done", "green"); D.UI:SetBadge("Done", "green")
         else
-            D.UI:Log("Error: " .. tostring(err), "red"); D.UI:SetBadge("Error", "red")
+            D.UI:Log("Error: "..tostring(err), "red"); D.UI:SetBadge("Error", "red")
         end
     end)
 end
@@ -219,11 +254,11 @@ end
 local caps = 0
 for _, v in pairs(has) do if v then caps = caps + 1 end end
 
-UI:Log("Dumper Pro v13 — Modular Engine", "green")
-UI:Log("Game: " .. UI:GetConfig().folder, "gray")
-UI:Log("Caps: " .. caps .. "/" .. #C.PROBES, "gray")
+UI:Log("Dumper Pro v13 — Optimized Engine", "green")
+UI:Log("Game: "..UI:GetConfig().folder, "gray")
+UI:Log("Caps: "..caps.."/"..#C.PROBES, "gray")
 UI:Log("Modes: SAFE | NORMAL | TURBO", "gray")
-UI:Log("★ Safe: no connection spy, no advanced, no hook decompile", "gray")
-UI:Log("★ Normal: tiered signals, GC funcmap, hidden scan, tags", "gray")
-UI:Log("★ Turbo: full analysis + deep upvalue chains", "gray")
+UI:Log("★ Safe: zero-crash, no GC/reg/threads/hooks, yield every 2", "gray")
+UI:Log("★ Normal: balanced — batch=3, all scanners", "gray")
+UI:Log("★ Turbo: max speed — batch=12, chunk=400, cache-burst=50", "gray")
 UI:Log("Press START", "white")
