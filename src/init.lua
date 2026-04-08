@@ -32,10 +32,6 @@ loadMod("output", false)
 local C   = D.Core
 local has = D.has
 
--- ══════════════════════════════════
---  PROCESSING ENGINE
--- ══════════════════════════════════
-
 local processingThread = nil
 
 local function onDone()
@@ -76,51 +72,61 @@ local function startProcessing()
         local cacheStreak = 0
 
         while #D.S.queue > 0 and not D.S.cancel do
+            -- Per-item pcall: protects against crash on individual scripts
             local entry = table.remove(D.S.queue, 1)
-            local isCacheHit = entry.bcHash
-                and entry.bcHash ~= "EMPTY"
-                and D.cache.bytecode[entry.bcHash]
 
-            D.Decompile.processOne(entry)
-            batch = batch + 1
+            local processOk = pcall(function()
+                local isCacheHit = entry.bcHash
+                    and entry.bcHash ~= "EMPTY"
+                    and D.cache.bytecode[entry.bcHash]
 
-            if batch % logEvery == 0 then
-                D.UI:Log(string.format("  %d/%d (%d cached, %d fail) %s",
-                    D.S.stats.ok+D.S.stats.fail, D.S.stats.queued,
-                    D.S.cacheStats.hits, D.S.stats.fail, C.elapsed()), "gray")
-            end
+                D.Decompile.processOne(entry)
+                batch = batch + 1
 
-            -- Yield: mode-adaptive
-            if mode == "turbo" then
-                if isCacheHit then
-                    cacheStreak = cacheStreak + 1
-                    if cacheStreak >= cacheHitBatch then cacheStreak = 0; task.wait() end
-                else
-                    cacheStreak = 0
-                    if batch % batchSize == 0 then task.wait() end
+                if batch % logEvery == 0 then
+                    D.UI:Log(string.format("  %d/%d (%d cached, %d fail) %s",
+                        D.S.stats.ok+D.S.stats.fail, D.S.stats.queued,
+                        D.S.cacheStats.hits, D.S.stats.fail, C.elapsed()), "gray")
                 end
-            elseif mode == "safe" then
-                -- Safe: always yield, always check memory
-                task.wait()
-                if batch % memCheckEvery == 0 then
-                    if not C.memoryGuard() then
-                        D.UI:Log("⚠ Memory limit — pausing 2s","red")
-                        task.wait(2)
-                        pcall(collectgarbage,"collect")
+
+                -- Yield strategy
+                if mode == "turbo" then
+                    if isCacheHit then
+                        cacheStreak = cacheStreak + 1
+                        if cacheStreak >= cacheHitBatch then cacheStreak = 0; task.wait() end
+                    else
+                        cacheStreak = 0
+                        if batch % batchSize == 0 then task.wait() end
+                    end
+                elseif mode == "safe" then
+                    -- Safe: yield between batches (batchSize=2), memory check
+                    if batch % batchSize == 0 then task.wait() end
+                    if batch % memCheckEvery == 0 then
                         if not C.memoryGuard() then
-                            D.UI:Log("⚠ Still critical — saving what we have","red")
-                            break
+                            D.UI:Log("⚠ Memory limit — pausing 2s","red")
+                            task.wait(2)
+                            pcall(collectgarbage,"collect")
+                            if not C.memoryGuard() then
+                                D.UI:Log("⚠ Still critical — saving","red")
+                                D.S.cancel = true
+                            end
                         end
                     end
-                end
-            else
-                if isCacheHit then
-                    if batch % (batchSize * 5) == 0 then task.wait() end
                 else
-                    if batch % batchSize == 0 then task.wait() end
+                    if isCacheHit then
+                        if batch % (batchSize * 5) == 0 then task.wait() end
+                    else
+                        if batch % batchSize == 0 then task.wait() end
+                    end
                 end
+            end)
+
+            if not processOk then
+                D.S.stats.fail = D.S.stats.fail + 1
+                batch = batch + 1
             end
 
+            -- Memory management
             if batch % memCheckEvery == 0 then
                 pcall(collectgarbage, "step", gcStep)
                 C.memoryGuard()
@@ -131,10 +137,6 @@ local function startProcessing()
         processingThread = nil
     end)
 end
-
--- ══════════════════════════════════
---  START DUMP
--- ══════════════════════════════════
 
 local function startDump()
     D.cfg = UI:GetConfig()
@@ -152,9 +154,9 @@ local function startDump()
     D.UI:Log("Limits: yield="..D.limits.yieldEvery
         .." gc="..D.limits.gcLimit
         .." timeout="..D.limits.decompileTimeout.."s"
-        .." batch="..D.limits.batchSize
-        .." depth="..D.limits.upvalueDepth, "blue")
-    D.UI:Log("Single file: "..tostring(D.S.isSingleFile), "blue")
+        .." batch="..D.limits.batchSize, "blue")
+    D.UI:Log("Dangerous calls: wait="..D.limits.dangerousWait
+        .."s timeout="..D.limits.dangerousTimeout.."s", "blue")
     D.UI:Log("Cache: "..(next(D.cache.bytecode) and "WARM" or "cold"), "blue")
     D.UI:Log("Memory: "..math.floor(C.getMemKB()/1024).."MB", "blue")
 
@@ -163,12 +165,14 @@ local function startDump()
     D.UI:Log("Modules: "..table.concat(mods," "), "blue")
     D.UI:Log("═══════════════════════════", "blue")
 
+    -- Collect
     D.Collect.collectAll()
 
     if D.S.cancel then
         D.UI:SetRunning(false); D.UI:SetBadge("Stopped","red"); return
     end
 
+    -- Hooks
     if D.Hooks and D.Hooks.analyze then
         C.memoryGuard(); task.wait(0.15)
         C.safeScan("Hooks", function() D.Hooks.analyze() end)
@@ -185,10 +189,6 @@ local function startDump()
 
     startProcessing()
 end
-
--- ══════════════════════════════════
---  UI WIRING
--- ══════════════════════════════════
 
 UI.OnStart = function()
     if processingThread then return end
@@ -220,8 +220,9 @@ for _, v in pairs(has) do if v then caps = caps + 1 end end
 UI:Log("Dumper Pro v13 — Maximum Discovery", "green")
 UI:Log("Game: "..UI:GetConfig().folder, "gray")
 UI:Log("Caps: "..caps.."/"..#C.PROBES, "gray")
-UI:Log("ALL scanners run in ALL modes", "white")
-UI:Log("★ Safe: max protection (yields+memchecks), same coverage", "gray")
-UI:Log("★ Normal: balanced speed + protection", "gray")
+UI:Log("ALL scanners run in ALL modes — nothing skipped", "white")
+UI:Log("★ Safe: protected calls + memory guards + yields (still fast)", "gray")
+UI:Log("★ Normal: balanced speed + full coverage", "gray")
 UI:Log("★ Turbo: max speed, chunk processing, cache bursts", "gray")
+UI:Log("Dangerous functions (getrunningscripts etc): spawned thread + timeout", "gray")
 UI:Log("Press START", "white")

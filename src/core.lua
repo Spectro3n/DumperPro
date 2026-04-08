@@ -9,26 +9,28 @@ C.UIS     = game:GetService("UserInputService")
 C.Tags    = game:GetService("CollectionService")
 C.LP      = C.Players.LocalPlayer
 
--- ══ MODE CONFIG — nothing is skipped, only protection level changes ══
+-- ══ MODES — all scan everything, only protection changes ══
 C.MODES = {
     safe = {
-        yieldEvery       = 2,       -- yield very often
-        gcLimit          = 80000,   -- still scan a LOT
-        decompileTimeout = 30,      -- patient decompile
-        maxNilDepth      = 3,       -- 3 levels deep
-        hooksPerService  = 500,     -- scan all hooks
-        connLimit        = 15,      -- all connections
-        hookDecompBudget = 10,      -- some decompile budget
-        maxDescendants   = 50000,   -- large scan
-        batchSize        = 1,       -- process 1 at a time
-        memCheckEvery    = 3,       -- very frequent mem checks
-        gcStepSize       = 30,      -- gentle GC
-        chunkProcess     = 30,      -- small chunks with pcall each
-        cacheHitBatch    = 4,       -- yield often even on cache
-        upvalueDepth     = 4,       -- upvalue chain depth
-        maxTags          = 500,     -- tag scan limit
-        maxModTrace      = 600,     -- module trace limit
-        logEvery         = 8,       -- log frequency
+        yieldEvery       = 5,
+        gcLimit          = 80000,
+        decompileTimeout = 25,
+        maxNilDepth      = 3,
+        hooksPerService  = 500,
+        connLimit        = 15,
+        hookDecompBudget = 10,
+        maxDescendants   = 50000,
+        batchSize        = 2,
+        memCheckEvery    = 8,
+        gcStepSize       = 40,
+        chunkProcess     = 50,
+        cacheHitBatch    = 8,
+        upvalueDepth     = 4,
+        maxTags          = 500,
+        maxModTrace      = 600,
+        logEvery         = 8,
+        dangerousWait    = 0.8,   -- wait before dangerous calls
+        dangerousTimeout = 12,    -- timeout for dangerous calls
     },
     normal = {
         yieldEvery       = 12,
@@ -48,6 +50,8 @@ C.MODES = {
         maxTags          = 500,
         maxModTrace      = 600,
         logEvery         = 10,
+        dangerousWait    = 0.3,
+        dangerousTimeout = 8,
     },
     turbo = {
         yieldEvery       = 80,
@@ -67,10 +71,11 @@ C.MODES = {
         maxTags          = 800,
         maxModTrace      = 1000,
         logEvery         = 25,
+        dangerousWait    = 0.1,
+        dangerousTimeout = 5,
     },
 }
 
--- ══ PROBES ══
 C.PROBES = {
     "decompile","saveinstance","getgc","getnilinstances",
     "getinstances","getscripts","getrunningscripts","getloadedmodules",
@@ -113,9 +118,6 @@ local REM_CLS = {
 }
 C.REM_CLS = REM_CLS
 
-local SCRIPT_CLS = {LocalScript=true, ModuleScript=true, Script=true}
-C.SCRIPT_CLS = SCRIPT_CLS
-
 function C.resetState()
     local cfg = D.cfg
     local mode = cfg.mode or "normal"
@@ -152,9 +154,9 @@ end
 function C.memoryGuard()
     local mem = C.getMemKB()
     if mem > 800000 then
-        pcall(collectgarbage,"collect"); task.wait(1.2)
-        D.UI:Log("⚠ Mem critical: "..math.floor(mem/1024).."MB — cleaning","red")
+        pcall(collectgarbage,"collect"); task.wait(1.5)
         mem = C.getMemKB()
+        D.UI:Log("⚠ Mem critical: "..math.floor(mem/1024).."MB","red")
         if mem > 750000 then return false end
     elseif mem > 500000 then
         pcall(collectgarbage,"step", D.limits.gcStepSize * 3); task.wait(0.3)
@@ -162,6 +164,14 @@ function C.memoryGuard()
         pcall(collectgarbage,"step", D.limits.gcStepSize)
     end
     return true
+end
+
+-- Force full cleanup — use before dangerous calls
+function C.deepClean()
+    pcall(collectgarbage, "collect")
+    task.wait(D.limits.dangerousWait)
+    pcall(collectgarbage, "collect")
+    task.wait(0.1)
 end
 
 -- ══ YIELD ══
@@ -183,7 +193,6 @@ function C.tickBulk(n)
     end
 end
 
--- Safe: yield + memory check combo
 function C.safeTick(counter)
     C.tick()
     if counter and counter % D.limits.memCheckEvery == 0 then
@@ -210,16 +219,50 @@ function C.safeScan(label, fn)
     return ok
 end
 
--- ══ TIMED CALL ══
+-- ══ TIMED CALL — runs function in spawned thread with timeout ══
 function C.timedCall(fn, timeout, ...)
     local args, rok, rval, done = {...}, nil, nil, false
-    task.spawn(function() rok, rval = pcall(fn, unpack(args)); done = true end)
+    task.spawn(function()
+        rok, rval = pcall(fn, unpack(args))
+        done = true
+    end)
     local t0 = os.clock()
     while not done do
         if os.clock()-t0 > timeout then return false, "Timeout" end
         task.wait(0.08)
     end
     return rok, rval
+end
+
+-- ══ DANGEROUS CALL — max protection for functions that can crash ══
+-- Memory cleanup → yield → spawned thread → pcall → timeout
+function C.dangerousCall(label, fn, ...)
+    D.UI:Log("    ⟐ "..label.." (protected)", "gray")
+
+    -- Step 1: clean memory
+    C.deepClean()
+
+    -- Step 2: verify memory is OK
+    if not C.memoryGuard() then
+        D.UI:Log("    ⚠ "..label..": memory too high, cleaning harder", "yellow")
+        pcall(collectgarbage, "collect")
+        task.wait(2)
+        if not C.memoryGuard() then
+            D.UI:Log("    ⚠ "..label..": skipping (memory critical)", "red")
+            return false, nil
+        end
+    end
+
+    -- Step 3: call in spawned thread with timeout
+    local ok, result = C.timedCall(fn, D.limits.dangerousTimeout, ...)
+
+    if not ok then
+        D.UI:Log("    ⚠ "..label..": failed or timed out", "red")
+        pcall(collectgarbage, "collect")
+        return false, nil
+    end
+
+    return true, result
 end
 
 -- ══ HELPERS ══
@@ -335,16 +378,19 @@ function C.buildFilePath(obj)
     return folder, fileName
 end
 
--- ══ ENQUEUE ══
+-- ══ ENQUEUE — extra safety on tostring ══
 function C.enqueue(obj, from)
-    local id = tostring(obj)
+    local idOk, id = pcall(tostring, obj)
+    if not idOk or not id then return end
     if D.S.seen[id] then D.S.stats.skip=D.S.stats.skip+1; return end
     D.S.seen[id] = true
 
     local skipReason
-    if C.isServerScript(obj) then
-        skipReason="server"; D.S.stats.server_skip=D.S.stats.server_skip+1
-    end
+    pcall(function()
+        if C.isServerScript(obj) then
+            skipReason="server"; D.S.stats.server_skip=D.S.stats.server_skip+1
+        end
+    end)
 
     local bcHash
     if D.has.getscriptbytecode and not skipReason then
@@ -378,7 +424,8 @@ function C.checkRemote(obj)
     if not D.cfg.dumpRemotes then return end
     local ok,cn = pcall(function() return obj.ClassName end)
     if not ok or not REM_CLS[cn] then return end
-    local id = tostring(obj)
+    local idOk, id = pcall(tostring, obj)
+    if not idOk then return end
     if D.S.remoteSeen[id] then return end
     D.S.remoteSeen[id]=true
     pcall(function()
@@ -410,7 +457,31 @@ function C.checkRemote(obj)
     end)
 end
 
--- ══ PROCESS LIST — mode-adaptive, NEVER skips ══
+-- ══ PROCESS LIST — safe single-item processing ══
+-- Each item: isolated pcall, never crashes the loop
+function C.processListSafe(list, from, maxCount)
+    if not list or #list == 0 then return end
+    local max = math.min(#list, maxCount or D.limits.maxDescendants)
+    local dumpRemotes = D.cfg.dumpRemotes
+    for i = 1, max do
+        if D.S.cancel then return end
+        -- Double pcall: outer catches any issue with the item itself
+        local itemOk = pcall(function()
+            local obj = list[i]
+            if not obj then return end
+            pcall(function()
+                if C.isScript(obj) then C.enqueue(obj, from) end
+            end)
+            if dumpRemotes then
+                pcall(function() C.checkRemote(obj) end)
+            end
+        end)
+        -- Always yield/check regardless of item success
+        if not C.safeTick(i) then return end
+    end
+end
+
+-- ══ PROCESS LIST — mode-adaptive ══
 function C.processObjList(list, from, maxCount)
     if not list or #list == 0 then return end
     local max = math.min(#list, maxCount or D.limits.maxDescendants)
@@ -426,23 +497,18 @@ function C.processObjList(list, from, maxCount)
                 for i = start, stop do
                     local obj = list[i]
                     if obj then
-                        if C.isScript(obj) then C.enqueue(obj, from) end
-                        if dumpRemotes then C.checkRemote(obj) end
+                        pcall(function()
+                            if C.isScript(obj) then C.enqueue(obj, from) end
+                            if dumpRemotes then C.checkRemote(obj) end
+                        end)
                     end
                 end
             end)
             C.tickBulk(chunk)
         end
     elseif mode == "safe" then
-        for i = 1, max do
-            if D.S.cancel then return end
-            pcall(function()
-                local obj = list[i]
-                if C.isScript(obj) then C.enqueue(obj, from) end
-                if dumpRemotes then C.checkRemote(obj) end
-            end)
-            if not C.safeTick(i) then return end
-        end
+        -- Safe: use processListSafe (per-item double pcall)
+        C.processListSafe(list, from, max)
     else
         for i = 1, max do
             if D.S.cancel then return end
