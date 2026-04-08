@@ -8,290 +8,231 @@ local function isTurbo() return mode() == "turbo" end
 local function isSafe() return mode() == "safe" end
 
 -- ══════════════════════════════════
---  SCAN SERVICE
+--  SCAN ALL SERVICES — iterate game:GetChildren()
+--  No hardcoded names. Scans EVERYTHING that exists.
 -- ══════════════════════════════════
 
-local function scanService(svcName)
-    if D.S.cancel then return end
-    C.safeScan("Svc:"..svcName, function()
-        local ok, svc = pcall(game.GetService, game, svcName)
-        if not ok or not svc then return end
-        D.UI:Log("  → "..svcName, "gray")
+local function scanWorkspace()
+    C.safeScan("Workspace", function()
+        D.UI:Log("  → Workspace (per-child)", "gray")
+        local ok, ch = pcall(function() return workspace:GetChildren() end)
+        if not ok or not ch then return end
 
-        if svcName == "Workspace" then
-            local ok2, ch = pcall(function() return svc:GetChildren() end)
-            if not ok2 or not ch then return end
-            for ci, child in ipairs(ch) do
-                if D.S.cancel then return end
-                pcall(function()
-                    if C.isScript(child) then C.enqueue(child, "Workspace") end
-                    C.checkRemote(child)
-                end)
-                pcall(function()
-                    local ok3, desc = pcall(function() return child:GetDescendants() end)
-                    if ok3 and desc then
-                        C.processObjList(desc, "Workspace", D.limits.maxDescendants)
-                        desc = nil
-                    end
-                end)
-                if isSafe() then
-                    C.yieldNow()
-                    if ci % D.limits.memCheckEvery == 0 then
-                        if not C.memoryGuard() then return end
-                    end
-                elseif isTurbo() then
-                    if ci % 15 == 0 then C.yieldNow() end
-                else
-                    if ci % 6 == 0 then C.yieldNow(); pcall(collectgarbage,"step",60) end
+        for ci, child in ipairs(ch) do
+            if D.S.cancel then return end
+
+            -- The child itself
+            pcall(function()
+                if C.isScript(child) then C.enqueue(child, "Workspace") end
+                C.checkRemote(child)
+            end)
+
+            -- All descendants of this child
+            pcall(function()
+                local ok2, desc = pcall(function() return child:GetDescendants() end)
+                if ok2 and desc then
+                    C.processObjList(desc, "Workspace", D.limits.maxDescendants)
+                    desc = nil
                 end
-            end
-            ch = nil
-        else
-            local ok2, desc = pcall(function() return svc:GetDescendants() end)
-            if ok2 and desc then
-                C.processObjList(desc, svcName, D.limits.maxDescendants)
-                desc = nil
+            end)
+
+            -- Yield strategy per child
+            if isSafe() then
+                C.yieldNow()
+                if ci % D.limits.memCheckEvery == 0 then
+                    if not C.memoryGuard() then return end
+                end
+            elseif isTurbo() then
+                if ci % 15 == 0 then C.yieldNow() end
+            else
+                if ci % 6 == 0 then C.yieldNow(); pcall(collectgarbage,"step",60) end
             end
         end
+        ch = nil
     end)
 end
 
+local function scanAllServices()
+    D.UI:Log("── Scanning ALL services ──", "blue")
+
+    -- Get every single child of game — these are all services
+    local ok, gameChildren = pcall(function() return game:GetChildren() end)
+    if not ok or not gameChildren then
+        D.UI:Log("  ⚠ Cannot get game children", "red")
+        return
+    end
+
+    D.UI:Log("  Found "..#gameChildren.." services/roots", "gray")
+
+    for _, svc in ipairs(gameChildren) do
+        if D.S.cancel then return end
+
+        local svcName = "?"
+        pcall(function() svcName = svc.Name end)
+
+        -- Workspace: handled separately (per-child for memory)
+        if svc == workspace then
+            scanWorkspace()
+        else
+            -- Every other service: scan all descendants
+            C.safeScan("Svc:"..svcName, function()
+                D.UI:Log("  → "..svcName, "gray")
+                local ok2, desc = pcall(function() return svc:GetDescendants() end)
+                if ok2 and desc then
+                    C.processObjList(desc, svcName, D.limits.maxDescendants)
+                    desc = nil
+                end
+            end)
+        end
+
+        -- Memory guard between services
+        if isSafe() then
+            if not C.memoryGuard() then
+                D.UI:Log("⚠ Memory pressure — pausing", "yellow")
+                task.wait(1)
+                C.memoryGuard()
+            end
+        end
+    end
+
+    gameChildren = nil
+end
+
 -- ══════════════════════════════════
---  DEEP PLAYER SCAN — the heart of player script discovery
+--  DEEP PLAYER SCAN
+--  Finds where humanoid is, scans around it,
+--  tools, accessories, backpack, everything
 -- ══════════════════════════════════
 
 local function scanPlayerDeep()
     D.UI:Log("  → Deep Player Scan", "orange")
 
-    -- 1. LocalPlayer containers
-    C.safeScan("LP_Containers", function()
-        if not C.LP then return end
-        for _, cn in ipairs({"PlayerGui","PlayerScripts","Backpack","StarterGear"}) do
-            if D.S.cancel then break end
-            pcall(function()
-                local c = C.LP:FindFirstChild(cn)
-                if not c then return end
-                D.UI:Log("    Player/"..cn, "gray")
-                local ok, desc = pcall(function() return c:GetDescendants() end)
-                if ok and desc then
-                    C.processObjList(desc, "Player."..cn)
-                    desc = nil
-                end
-            end)
-            C.yieldNow()
-        end
-    end)
-
-    -- 2. LocalPlayer character — find humanoid, scan everything
-    C.safeScan("LP_Character", function()
-        if not C.LP then return end
+    -- Helper: scan every child and descendant of a container
+    local function scanContainer(container, label)
+        if not container then return end
         pcall(function()
-            local char = C.LP.Character
-            if not char then return end
-            D.UI:Log("    LP Character: "..char.Name, "gray")
-
+            -- Direct scripts
+            for _, child in ipairs(container:GetChildren()) do
+                pcall(function()
+                    if C.isScript(child) then C.enqueue(child, label) end
+                    C.checkRemote(child)
+                end)
+            end
             -- All descendants
+            local ok, desc = pcall(function() return container:GetDescendants() end)
+            if ok and desc then
+                C.processObjList(desc, label)
+                desc = nil
+            end
+        end)
+    end
+
+    -- Helper: scan a character model deeply (humanoid location, tools, accessories)
+    local function scanCharacterDeep(char, label)
+        if not char then return end
+        pcall(function()
+            -- All descendants first
             local ok, desc = pcall(function() return char:GetDescendants() end)
             if ok and desc then
-                C.processObjList(desc, "LP.Char")
+                C.processObjList(desc, label)
                 desc = nil
             end
 
-            -- Tools held by character
-            for _, child in ipairs(char:GetChildren()) do
-                pcall(function()
-                    if child:IsA("Tool") or child:IsA("BackpackItem") then
-                        local ok2, td = pcall(function() return child:GetDescendants() end)
-                        if ok2 and td then
-                            C.processObjList(td, "LP.HeldTool."..child.Name)
-                            td = nil
-                        end
-                    end
-                end)
-            end
-
-            -- Accessories with scripts
-            for _, child in ipairs(char:GetChildren()) do
-                pcall(function()
-                    if child:IsA("Accessory") or child:IsA("Hat") then
-                        local ok2, ad = pcall(function() return child:GetDescendants() end)
-                        if ok2 and ad then
-                            C.processObjList(ad, "LP.Accessory."..child.Name)
-                            ad = nil
-                        end
-                    end
-                end)
-            end
-
-            -- Scripts near humanoid
+            -- Find humanoid — scan siblings (scripts near humanoid)
             local hum = char:FindFirstChildOfClass("Humanoid")
             if hum and hum.Parent then
                 for _, sibling in ipairs(hum.Parent:GetChildren()) do
                     pcall(function()
                         if C.isScript(sibling) then
-                            C.enqueue(sibling, "LP.HumanoidSibling")
+                            C.enqueue(sibling, label..".HumSibling")
+                        end
+                        C.checkRemote(sibling)
+                        -- Also scan inside each sibling
+                        local ok2, sd = pcall(function() return sibling:GetDescendants() end)
+                        if ok2 and sd then
+                            C.processObjList(sd, label..".HumChild")
+                            sd = nil
                         end
                     end)
                 end
             end
+
+            -- Every child category
+            for _, child in ipairs(char:GetChildren()) do
+                pcall(function()
+                    -- Tools held by character
+                    if child:IsA("Tool") or child:IsA("BackpackItem") then
+                        scanContainer(child, label..".Tool."..child.Name)
+                    end
+                    -- Accessories
+                    if child:IsA("Accessory") or child:IsA("Hat") then
+                        scanContainer(child, label..".Acc."..child.Name)
+                    end
+                    -- Any Model inside character
+                    if child:IsA("Model") then
+                        scanContainer(child, label..".Model."..child.Name)
+                    end
+                    -- Any Folder inside character
+                    if child:IsA("Folder") or child:IsA("Configuration") then
+                        scanContainer(child, label..".Folder."..child.Name)
+                    end
+                end)
+            end
+        end)
+    end
+
+    -- 1. LocalPlayer containers
+    C.safeScan("LP_Containers", function()
+        if not C.LP then return end
+        -- Scan every child of the player object
+        pcall(function()
+            for _, child in ipairs(C.LP:GetChildren()) do
+                if D.S.cancel then break end
+                local childName = "?"
+                pcall(function() childName = child.Name end)
+                D.UI:Log("    Player/"..childName, "gray")
+                scanContainer(child, "Player."..childName)
+                C.yieldNow()
+            end
         end)
     end)
 
-    -- 3. Backpack — every tool deeply
-    C.safeScan("LP_Backpack_Deep", function()
+    -- 2. LocalPlayer character — deep humanoid scan
+    C.safeScan("LP_Character", function()
         if not C.LP then return end
         pcall(function()
-            local bp = C.LP:FindFirstChild("Backpack")
-            if not bp then return end
-            D.UI:Log("    Backpack tools", "gray")
-            for _, tool in ipairs(bp:GetChildren()) do
-                if D.S.cancel then break end
-                pcall(function()
-                    if C.isScript(tool) then C.enqueue(tool, "Backpack") end
-                    local ok, desc = pcall(function() return tool:GetDescendants() end)
-                    if ok and desc then
-                        C.processObjList(desc, "Backpack."..tool.Name)
-                        desc = nil
-                    end
-                end)
-                C.tick()
+            local char = C.LP.Character
+            if char then
+                D.UI:Log("    LP Character: "..char.Name, "gray")
+                scanCharacterDeep(char, "LP.Char")
             end
         end)
     end)
 
-    -- 4. ALL players' characters + backpacks
+    -- 3. ALL players — character + every container
     C.safeScan("AllPlayers", function()
-        D.UI:Log("    All player characters", "gray")
-        local playerCount = 0
+        D.UI:Log("    All players", "gray")
         for _, player in ipairs(C.Players:GetPlayers()) do
             if D.S.cancel then break end
-            playerCount = playerCount + 1
             pcall(function()
-                -- Character
-                local char = player.Character
-                if char then
-                    local ok, desc = pcall(function() return char:GetDescendants() end)
-                    if ok and desc then
-                        C.processObjList(desc, "Char."..player.Name)
-                        desc = nil
-                    end
-                    -- Tools in character
+                -- Scan every child of the player object
+                for _, child in ipairs(player:GetChildren()) do
                     pcall(function()
-                        for _, ch in ipairs(char:GetChildren()) do
-                            if (ch:IsA("Tool") or ch:IsA("BackpackItem")) then
-                                local ok2, td = pcall(function() return ch:GetDescendants() end)
-                                if ok2 and td then
-                                    C.processObjList(td, "CharTool."..player.Name.."."..ch.Name)
-                                    td = nil
-                                end
-                            end
-                        end
+                        scanContainer(child, "P."..player.Name.."."..child.Name)
                     end)
                 end
-                -- Backpack
-                pcall(function()
-                    local bp = player:FindFirstChild("Backpack")
-                    if bp then
-                        local ok2, bd = pcall(function() return bp:GetDescendants() end)
-                        if ok2 and bd then
-                            C.processObjList(bd, "OtherBP."..player.Name)
-                            bd = nil
-                        end
-                    end
-                end)
-                -- PlayerGui
-                pcall(function()
-                    local pg = player:FindFirstChild("PlayerGui")
-                    if pg then
-                        local ok2, gd = pcall(function() return pg:GetDescendants() end)
-                        if ok2 and gd then
-                            C.processObjList(gd, "OtherPG."..player.Name)
-                            gd = nil
-                        end
-                    end
-                end)
+                -- Character deep scan
+                if player.Character then
+                    scanCharacterDeep(player.Character, "Char."..player.Name)
+                end
             end)
             C.tick()
         end
-        D.UI:Log("      "..playerCount.." players scanned", "gray")
     end)
 
-    -- 5. StarterPack — every item deeply
-    C.safeScan("StarterPack_Deep", function()
-        D.UI:Log("    StarterPack deep", "gray")
-        pcall(function()
-            local sp = game:GetService("StarterPack")
-            local ok, desc = pcall(function() return sp:GetDescendants() end)
-            if ok and desc then
-                C.processObjList(desc, "StarterPack")
-                desc = nil
-            end
-        end)
-    end)
-
-    -- 6. StarterPlayer — every sub-container
-    C.safeScan("StarterPlayer_Deep", function()
-        D.UI:Log("    StarterPlayer deep", "gray")
-        pcall(function()
-            local sp = game:GetService("StarterPlayer")
-            -- StarterPlayerScripts
-            pcall(function()
-                local sps = sp:FindFirstChild("StarterPlayerScripts")
-                if sps then
-                    local ok, desc = pcall(function() return sps:GetDescendants() end)
-                    if ok and desc then C.processObjList(desc, "StarterPlayerScripts"); desc = nil end
-                end
-            end)
-            -- StarterCharacterScripts
-            pcall(function()
-                local scs = sp:FindFirstChild("StarterCharacterScripts")
-                if scs then
-                    local ok, desc = pcall(function() return scs:GetDescendants() end)
-                    if ok and desc then C.processObjList(desc, "StarterCharScripts"); desc = nil end
-                end
-            end)
-            -- Direct children
-            pcall(function()
-                for _, child in ipairs(sp:GetChildren()) do
-                    if C.isScript(child) then C.enqueue(child, "StarterPlayer.Direct") end
-                end
-            end)
-        end)
-    end)
-
-    -- 7. StarterGui deep
-    C.safeScan("StarterGui_Deep", function()
-        D.UI:Log("    StarterGui deep", "gray")
-        pcall(function()
-            local sg = game:GetService("StarterGui")
-            local ok, desc = pcall(function() return sg:GetDescendants() end)
-            if ok and desc then C.processObjList(desc, "StarterGui.Deep"); desc = nil end
-        end)
-    end)
-
-    -- 8. Workspace models named after players
-    C.safeScan("WS_PlayerModels", function()
-        D.UI:Log("    Workspace player-named models", "gray")
-        pcall(function()
-            for _, player in ipairs(C.Players:GetPlayers()) do
-                if D.S.cancel then break end
-                pcall(function()
-                    local model = workspace:FindFirstChild(player.Name)
-                    if model and model:IsA("Model") then
-                        local ok, desc = pcall(function() return model:GetDescendants() end)
-                        if ok and desc then
-                            C.processObjList(desc, "WS_Player."..player.Name)
-                            desc = nil
-                        end
-                    end
-                end)
-            end
-        end)
-    end)
-
-    -- 9. ALL humanoid-containing models in workspace
+    -- 4. ALL humanoid-containing models in workspace
     C.safeScan("AllHumanoids", function()
-        D.UI:Log("    All humanoid models", "gray")
+        D.UI:Log("    All humanoid models in workspace", "gray")
         local count = 0
         pcall(function()
             local ok, ch = pcall(function() return workspace:GetChildren() end)
@@ -303,11 +244,7 @@ local function scanPlayerDeep()
                         local hum = child:FindFirstChildOfClass("Humanoid")
                         if hum then
                             count = count + 1
-                            local ok2, desc = pcall(function() return child:GetDescendants() end)
-                            if ok2 and desc then
-                                C.processObjList(desc, "Humanoid."..child.Name)
-                                desc = nil
-                            end
+                            scanCharacterDeep(child, "Humanoid."..child.Name)
                         end
                     end
                 end)
@@ -318,99 +255,24 @@ local function scanPlayerDeep()
         if count > 0 then D.UI:Log("      "..count.." humanoid models", "gray") end
     end)
 
-    -- 10. Workspace folders, configurations, models with scripts
-    C.safeScan("WS_Structures", function()
-        D.UI:Log("    Workspace structure scan", "gray")
-        local count = 0
+    -- 5. Workspace player-named models
+    C.safeScan("WS_PlayerModels", function()
         pcall(function()
-            local ok, ch = pcall(function() return workspace:GetChildren() end)
-            if not ok or not ch then return end
-            for ci, child in ipairs(ch) do
+            for _, player in ipairs(C.Players:GetPlayers()) do
                 if D.S.cancel then break end
                 pcall(function()
-                    if child:IsA("Folder") or child:IsA("Configuration")
-                       or child:IsA("Model") or child:IsA("Actor") then
-                        local ok2, desc = pcall(function() return child:GetDescendants() end)
-                        if ok2 and desc then
-                            for _, obj in ipairs(desc) do
-                                pcall(function()
-                                    if C.isScript(obj) then
-                                        C.enqueue(obj, "WS_Structure."..child.Name)
-                                        count = count + 1
-                                    end
-                                    C.checkRemote(obj)
-                                end)
-                            end
-                            desc = nil
-                        end
+                    local model = workspace:FindFirstChild(player.Name)
+                    if model and model:IsA("Model") then
+                        scanCharacterDeep(model, "WS_Player."..player.Name)
                     end
                 end)
-                if not C.safeTick(ci) then return end
             end
-            ch = nil
         end)
-        if count > 0 then D.UI:Log("      +"..count.." from structures", "green") end
     end)
 end
 
 -- ══════════════════════════════════
---  CONTAINERS — expanded search
--- ══════════════════════════════════
-
-local function scanContainers()
-    local containers = {
-        "Characters","Chars","PlayerCharacters","Entities","NPCs",
-        "Mobs","Models","Units","Actors","Avatars","PlayerModels",
-        "Enemies","Bots","AI","Minions","Pets","Companions",
-        "Vehicles","Weapons","Tools","Items","Collectibles",
-        "Systems","Managers","Controllers","Services","Modules",
-        "Shared","Common","Lib","Library","Libraries","Utils",
-        "Utility","Utilities","Packages","Framework","Client",
-        "Assets","Resources","Data","Storage","Cache","Config",
-        "Settings","Effects","Particles","Sounds","GUI","UI",
-        "Interface","Screens","Menus","HUD","Notifications",
-        "Events","Signals","Network","Remotes","Communication",
-        "Game","GameFramework","Core","Gameplay","World",
-    }
-
-    C.safeScan("Containers", function()
-        D.UI:Log("  → Container scan ("..#containers.." names)", "orange")
-        local roots = {}
-        pcall(function() roots[#roots+1] = workspace end)
-        pcall(function() roots[#roots+1] = game:GetService("ReplicatedStorage") end)
-        pcall(function() roots[#roots+1] = game:GetService("ReplicatedFirst") end)
-        pcall(function() roots[#roots+1] = game:GetService("StarterPlayer") end)
-        pcall(function() roots[#roots+1] = game:GetService("StarterGui") end)
-        pcall(function() roots[#roots+1] = game:GetService("StarterPack") end)
-        pcall(function() roots[#roots+1] = game:GetService("Lighting") end)
-        pcall(function() roots[#roots+1] = game:GetService("SoundService") end)
-
-        local found = 0
-        for _, root in ipairs(roots) do
-            for _, name in ipairs(containers) do
-                if D.S.cancel then return end
-                pcall(function()
-                    local c = root:FindFirstChild(name)
-                    if c then
-                        local ok, desc = pcall(function() return c:GetDescendants() end)
-                        if ok and desc then
-                            local before = D.S.stats.total
-                            C.processObjList(desc, "Container."..name)
-                            found = found + (D.S.stats.total - before)
-                            desc = nil
-                        end
-                    end
-                end)
-            end
-            if isSafe() then C.yieldNow() end
-        end
-        if found > 0 then D.UI:Log("    +"..found.." from containers", "green") end
-    end)
-end
-
--- ══════════════════════════════════
---  BASIC SOURCES — CRASH-SAFE VERSION
---  Each function: memory cleanup → dangerousCall → safe processing
+--  BASIC SOURCES — CRASH-SAFE
 -- ══════════════════════════════════
 
 local function scanBasicSources()
@@ -418,57 +280,42 @@ local function scanBasicSources()
     if not D.S.cancel and has.getscripts then
         C.safeScan("getscripts", function()
             D.UI:Log("  → getscripts()", "orange")
-
             local ok, s = C.dangerousCall("getscripts", getscripts)
             if not ok or not s then return end
-
             D.UI:Log("    "..#s.." total scripts", "gray")
             C.processListSafe(s, "getscripts")
             s = nil
         end)
-
-        -- cleanup between calls
         C.yieldNow()
         C.memoryGuard()
     end
 
-    -- ── getrunningscripts — THE CRASH FIX ──
+    -- ── getrunningscripts — protected ──
     if not D.S.cancel and D.cfg.scanRunning and has.getrunningscripts then
         C.safeScan("running", function()
             D.UI:Log("  → getrunningscripts() [protected]", "orange")
-
-            -- Step 1: aggressive cleanup BEFORE the call
             C.deepClean()
 
-            -- Step 2: call via dangerousCall (spawned thread + timeout + pcall)
             local ok, s = C.dangerousCall("getrunningscripts", getrunningscripts)
             if not ok or not s then
-                D.UI:Log("    ⚠ getrunningscripts failed — continuing without it", "yellow")
+                D.UI:Log("    ⚠ getrunningscripts failed — continuing", "yellow")
                 return
             end
 
             D.UI:Log("    "..#s.." running scripts", "gray")
 
-            -- Step 3: process ONE AT A TIME with full isolation
+            -- Process ONE AT A TIME, triple protection
             for i = 1, #s do
                 if D.S.cancel then break end
-                -- Triple protection: outer pcall catches everything
                 pcall(function()
                     local obj = s[i]
                     if not obj then return end
-                    -- Inner pcall for the actual script check
                     pcall(function()
-                        if C.isScript(obj) then
-                            C.enqueue(obj, "running")
-                        end
+                        if C.isScript(obj) then C.enqueue(obj, "running") end
                     end)
-                    pcall(function()
-                        C.checkRemote(obj)
-                    end)
+                    pcall(function() C.checkRemote(obj) end)
                 end)
-                -- ALWAYS yield between items (prevents buildup)
                 if i % 3 == 0 then task.wait() end
-                -- Memory check frequently
                 if i % 10 == 0 then
                     if not C.memoryGuard() then
                         D.UI:Log("    ⚠ memory limit at "..i.."/"..#s, "yellow")
@@ -478,8 +325,6 @@ local function scanBasicSources()
             end
             s = nil
         end)
-
-        -- Cleanup after
         C.yieldNow()
         pcall(collectgarbage, "collect")
         task.wait(0.3)
@@ -489,7 +334,6 @@ local function scanBasicSources()
     if not D.S.cancel and D.cfg.scanLoaded and has.getloadedmodules then
         C.safeScan("loaded", function()
             D.UI:Log("  → getloadedmodules() [protected]", "orange")
-
             C.deepClean()
 
             local ok, m = C.dangerousCall("getloadedmodules", getloadedmodules)
@@ -502,21 +346,19 @@ local function scanBasicSources()
             C.processListSafe(m, "loaded")
             m = nil
         end)
-
         C.yieldNow()
         C.memoryGuard()
     end
 end
 
 -- ══════════════════════════════════
---  NIL INSTANCES — recursive with depth control
+--  NIL INSTANCES — recursive
 -- ══════════════════════════════════
 
 local function scanNil()
     if not D.cfg.scanNil or not has.getnilinstances then return end
     C.safeScan("nil", function()
         D.UI:Log("  → getnilinstances() [protected]", "orange")
-
         C.deepClean()
 
         local ok, nils = C.dangerousCall("getnilinstances", getnilinstances)
@@ -611,16 +453,11 @@ end
 local function scanRegistry()
     if not D.cfg.scanReg then return end
     C.safeScan("Registry", function()
-        local reg
-        if has.getreg then
-            C.deepClean()
-            local ok
-            ok, reg = C.dangerousCall("getreg", getreg)
-            if not ok or not reg then
-                D.UI:Log("    ⚠ getreg failed", "yellow")
-                return
-            end
-        else
+        if not has.getreg then return end
+        C.deepClean()
+        local ok, reg = C.dangerousCall("getreg", getreg)
+        if not ok or not reg then
+            D.UI:Log("    ⚠ getreg failed", "yellow")
             return
         end
 
@@ -697,7 +534,7 @@ local function scanRegistry()
 end
 
 -- ══════════════════════════════════
---  GC / INSTANCES / THREADS — all protected
+--  GC / INSTANCES / THREADS
 -- ══════════════════════════════════
 
 local function testGC()
@@ -710,8 +547,8 @@ local function scanGC()
     if not D.cfg.scanGC or not testGC() then return end
     C.safeScan("GC", function()
         C.deepClean()
-
         D.UI:Log("  → getgc() [protected]", "orange")
+
         local ok, gc = C.dangerousCall("getgc", getgc, true)
         if not ok or not gc then
             D.UI:Log("    ⚠ getgc failed", "yellow")
@@ -885,59 +722,6 @@ local function gcFunctionMap()
 end
 
 -- ══════════════════════════════════
---  ADVANCED: Hidden Locations — expanded
--- ══════════════════════════════════
-
-local function hiddenLocationScan()
-    local found = 0
-    C.safeScan("HiddenLocs", function()
-        D.UI:Log("  → hiddenLocations()", "orange")
-        local locs = {}
-        pcall(function() locs[#locs+1] = {"Camera",        workspace.CurrentCamera} end)
-        pcall(function() locs[#locs+1] = {"Terrain",        workspace.Terrain} end)
-        pcall(function() locs[#locs+1] = {"CoreGui",        game:GetService("CoreGui")} end)
-        pcall(function() locs[#locs+1] = {"CorePkg",        game:GetService("CorePackages")} end)
-        pcall(function() locs[#locs+1] = {"Debris",         game:GetService("Debris")} end)
-        pcall(function() locs[#locs+1] = {"Tween",          game:GetService("TweenService")} end)
-        pcall(function() locs[#locs+1] = {"Content",        game:GetService("ContentProvider")} end)
-        pcall(function() locs[#locs+1] = {"Network",        game:GetService("NetworkClient")} end)
-        pcall(function() locs[#locs+1] = {"RunSvc",         game:GetService("RunService")} end)
-        pcall(function() locs[#locs+1] = {"HttpSvc",        game:GetService("HttpService")} end)
-        pcall(function() locs[#locs+1] = {"GuiSvc",         game:GetService("GuiService")} end)
-        pcall(function() locs[#locs+1] = {"Marketplace",    game:GetService("MarketplaceService")} end)
-        pcall(function() locs[#locs+1] = {"TextChat",       game:GetService("TextChatService")} end)
-        pcall(function() locs[#locs+1] = {"Material",       game:GetService("MaterialService")} end)
-        pcall(function() locs[#locs+1] = {"Pathfinding",    game:GetService("PathfindingService")} end)
-        pcall(function() locs[#locs+1] = {"Physics",        game:GetService("PhysicsService")} end)
-        pcall(function() locs[#locs+1] = {"ProxPrompt",     game:GetService("ProximityPromptService")} end)
-        pcall(function() locs[#locs+1] = {"Social",         game:GetService("SocialService")} end)
-        pcall(function() locs[#locs+1] = {"PolicySvc",      game:GetService("PolicyService")} end)
-        pcall(function() locs[#locs+1] = {"Selection",      game:GetService("Selection")} end)
-        pcall(function() locs[#locs+1] = {"VR",             game:GetService("VRService")} end)
-        pcall(function() locs[#locs+1] = {"Localization",   game:GetService("LocalizationService")} end)
-
-        for _, loc in ipairs(locs) do
-            if D.S.cancel then break end
-            pcall(function()
-                local ok, desc = pcall(function() return loc[2]:GetDescendants() end)
-                if ok and desc and #desc > 0 then
-                    for _, obj in ipairs(desc) do
-                        pcall(function()
-                            if C.isScript(obj) then C.enqueue(obj, "hidden."..loc[1]); found = found + 1 end
-                            C.checkRemote(obj)
-                        end)
-                    end
-                    desc = nil
-                end
-            end)
-            C.tick()
-            if isSafe() then C.yieldNow() end
-        end
-    end)
-    if found > 0 then D.UI:Log("    +"..found.." hidden", "green") end
-end
-
--- ══════════════════════════════════
 --  ADVANCED: CollectionService Tags
 -- ══════════════════════════════════
 
@@ -975,8 +759,8 @@ local function moduleRequireTrace()
     local found = 0
     C.safeScan("RequireTrace", function()
         D.UI:Log("  → moduleRequireTrace()", "orange")
-
         C.deepClean()
+
         local ok, mods = C.dangerousCall("mods_trace", getloadedmodules)
         if not ok or not mods then return end
 
@@ -989,6 +773,7 @@ local function moduleRequireTrace()
                 if not fn then return end
                 local ok2, consts = pcall(getconstants, fn)
                 if not ok2 or not consts then return end
+
                 local hasReq, paths = false, {}
                 for ci, c in ipairs(consts) do
                     if ci > 300 then break end
@@ -997,21 +782,29 @@ local function moduleRequireTrace()
                         paths[#paths+1] = c
                     end
                 end
+
                 if hasReq and #paths > 0 then
                     local roots = {}
                     pcall(function() roots[#roots+1] = game:GetService("ReplicatedStorage") end)
                     pcall(function() roots[#roots+1] = game:GetService("ReplicatedFirst") end)
                     pcall(function() roots[#roots+1] = mod.Parent end)
-                    pcall(function() if mod.Parent and mod.Parent.Parent then roots[#roots+1] = mod.Parent.Parent end end)
+                    pcall(function()
+                        if mod.Parent and mod.Parent.Parent then
+                            roots[#roots+1] = mod.Parent.Parent
+                        end
+                    end)
                     for _, path in ipairs(paths) do
                         for _, root in ipairs(roots) do
                             pcall(function()
                                 local t = root:FindFirstChild(path, true)
-                                if t and C.isScript(t) then C.enqueue(t, "require_trace"); found = found + 1 end
+                                if t and C.isScript(t) then
+                                    C.enqueue(t, "require_trace"); found = found + 1
+                                end
                             end)
                         end
                     end
                 end
+
                 if has.getupvalues then
                     pcall(function()
                         local ups = getupvalues(fn)
@@ -1037,6 +830,77 @@ local function moduleRequireTrace()
         mods = nil
     end)
     if found > 0 then D.UI:Log("    +"..found.." via require trace", "green") end
+end
+
+-- ══════════════════════════════════
+--  ADVANCED: GC Table Deep Scan
+-- ══════════════════════════════════
+
+local function gcTableDeepScan()
+    if not testGC() then return end
+    local found = 0
+    C.safeScan("GCTableDeep", function()
+        D.UI:Log("  → gcTableDeepScan()", "orange")
+        C.deepClean()
+
+        local ok, gc = C.dangerousCall("gc_tbl_deep", getgc, true)
+        if not ok or not gc then return end
+
+        local sz = math.min(#gc, D.limits.gcLimit)
+        local visited = {}
+        local chunk = isTurbo() and 400 or (isSafe() and 40 or 150)
+
+        for start = 1, sz, chunk do
+            if D.S.cancel then break end
+            pcall(function()
+                local stop = math.min(start + chunk - 1, sz)
+                for i = start, stop do
+                    local v = gc[i]
+                    if type(v) == "table" then
+                        local tidOk, tid = pcall(tostring, v)
+                        if tidOk and not visited[tid] then
+                            visited[tid] = true
+                            pcall(function()
+                                local tc = 0
+                                for k2, v2 in pairs(v) do
+                                    tc = tc + 1; if tc > 60 then break end
+                                    if typeof(v2) == "Instance" then
+                                        pcall(function()
+                                            if C.isScript(v2) then
+                                                C.enqueue(v2, "gc_tbl_deep"); found = found + 1
+                                            end
+                                            C.checkRemote(v2)
+                                        end)
+                                    elseif type(v2) == "table" then
+                                        pcall(function()
+                                            local tc2 = 0
+                                            for _, v3 in pairs(v2) do
+                                                tc2 = tc2 + 1; if tc2 > 20 then break end
+                                                if typeof(v3) == "Instance" and C.isScript(v3) then
+                                                    C.enqueue(v3, "gc_tbl2"); found = found + 1
+                                                end
+                                            end
+                                        end)
+                                    end
+                                    if typeof(k2) == "Instance" and C.isScript(k2) then
+                                        C.enqueue(k2, "gc_tbl_key"); found = found + 1
+                                    end
+                                end
+                            end)
+                        end
+                    end
+                end
+            end)
+            if isSafe() then
+                C.yieldNow()
+                if not C.memoryGuard() then break end
+            else
+                C.tickBulk(chunk)
+            end
+        end
+        gc = nil; visited = nil
+    end)
+    if found > 0 then D.UI:Log("    +"..found.." via GC table deep", "green") end
 end
 
 -- ══════════════════════════════════
@@ -1121,145 +985,57 @@ local function deepUpvalueChain()
 end
 
 -- ══════════════════════════════════
---  ADVANCED: GC Table Deep Scan
--- ══════════════════════════════════
-
-local function gcTableDeepScan()
-    if not testGC() then return end
-    local found = 0
-    C.safeScan("GCTableDeep", function()
-        D.UI:Log("  → gcTableDeepScan()", "orange")
-        C.deepClean()
-
-        local ok, gc = C.dangerousCall("gc_tbl_deep", getgc, true)
-        if not ok or not gc then return end
-
-        local sz = math.min(#gc, D.limits.gcLimit)
-        local visited = {}
-        local chunk = isTurbo() and 400 or (isSafe() and 40 or 150)
-
-        for start = 1, sz, chunk do
-            if D.S.cancel then break end
-            pcall(function()
-                local stop = math.min(start + chunk - 1, sz)
-                for i = start, stop do
-                    local v = gc[i]
-                    if type(v) == "table" then
-                        local tidOk, tid = pcall(tostring, v)
-                        if tidOk and not visited[tid] then
-                            visited[tid] = true
-                            pcall(function()
-                                local tc = 0
-                                for k2, v2 in pairs(v) do
-                                    tc = tc + 1; if tc > 60 then break end
-                                    if typeof(v2) == "Instance" then
-                                        pcall(function()
-                                            if C.isScript(v2) then C.enqueue(v2, "gc_tbl_deep"); found = found + 1 end
-                                            C.checkRemote(v2)
-                                        end)
-                                    elseif type(v2) == "table" then
-                                        pcall(function()
-                                            local tc2 = 0
-                                            for _, v3 in pairs(v2) do
-                                                tc2 = tc2 + 1; if tc2 > 20 then break end
-                                                if typeof(v3) == "Instance" and C.isScript(v3) then
-                                                    C.enqueue(v3, "gc_tbl2"); found = found + 1
-                                                end
-                                            end
-                                        end)
-                                    end
-                                    if typeof(k2) == "Instance" and C.isScript(k2) then
-                                        C.enqueue(k2, "gc_tbl_key"); found = found + 1
-                                    end
-                                end
-                            end)
-                        end
-                    end
-                end
-            end)
-            if isSafe() then
-                C.yieldNow()
-                if not C.memoryGuard() then break end
-            else
-                C.tickBulk(chunk)
-            end
-        end
-        gc = nil; visited = nil
-    end)
-    if found > 0 then D.UI:Log("    +"..found.." via GC table deep", "green") end
-end
-
--- ══════════════════════════════════
---  ORCHESTRATOR — everything runs, always
+--  ORCHESTRATOR
 -- ══════════════════════════════════
 
 function M.collectAll()
     local m = mode()
     D.UI:SetPhase("collecting")
     D.UI:Log("Collecting ("..m:upper()..")...", "blue")
-    D.UI:Log("★ ALL scanners active", "blue")
+    D.UI:Log("★ ALL scanners active — scanning every service in game", "blue")
     task.wait(0.2)
 
-    -- 1. Services
-    local services = {
-        "ReplicatedStorage","ReplicatedFirst","Lighting",
-        "StarterGui","StarterPack","StarterPlayer",
-        "Workspace","Chat","SoundService","TestService",
-        "TextChatService","MaterialService","Teams",
-    }
-    for _, name in ipairs(services) do
-        if D.S.cancel then return end
-        scanService(name)
-        if isSafe() and not C.memoryGuard() then
-            D.UI:Log("⚠ Memory pressure — pausing", "yellow")
-            task.wait(1); C.memoryGuard()
-        end
-    end
+    -- 1. Scan EVERY service — no hardcoded list
+    if not D.S.cancel then scanAllServices() end
+    C.memoryGuard()
 
-    -- 2. Deep player scan (humanoid, tools, backpack, etc.)
+    -- 2. Deep player scan
     if not D.S.cancel then scanPlayerDeep() end
     C.memoryGuard()
 
-    -- 3. Containers
-    if not D.S.cancel then scanContainers() end
-    C.memoryGuard()
-
-    -- 4. Basic sources (PROTECTED — crash fix here)
+    -- 3. Basic sources (protected)
     if not D.S.cancel then scanBasicSources() end
     C.memoryGuard()
 
-    -- 5. Nil instances
+    -- 4. Nil
     if not D.S.cancel then scanNil() end
     C.memoryGuard()
 
-    -- 6. Connections
+    -- 5. Connections
     if not D.S.cancel then scanConnScripts() end
     C.memoryGuard()
 
-    -- 7. Registry
+    -- 6. Registry
     if not D.S.cancel then scanRegistry() end
     C.memoryGuard()
 
-    -- 8. GC
+    -- 7. GC
     if not D.S.cancel then scanGC() end
     C.memoryGuard()
 
-    -- 9. Instances
+    -- 8. Instances
     if not D.S.cancel then scanInstances() end
     C.memoryGuard()
 
-    -- 10. Threads
+    -- 9. Threads
     if not D.S.cancel then scanThreads() end
     C.memoryGuard()
 
-    -- 11. Advanced
+    -- 10. Advanced
     D.UI:Log("── Advanced Methods ──", "blue")
     task.wait(0.15)
 
     if not D.S.cancel then gcFunctionMap() end
-    C.memoryGuard()
-
-    if not D.S.cancel then hiddenLocationScan() end
     C.memoryGuard()
 
     if not D.S.cancel then collectionServiceScan() end
