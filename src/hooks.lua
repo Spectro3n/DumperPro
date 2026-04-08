@@ -16,7 +16,7 @@ local function budgetDecomp(fn, timeout)
     decompUsed = decompUsed + 1
     local ok, src = C.timedCall(decompile, timeout or 3, fn)
     if ok and type(src) == "string" and #src > 4 then
-        return src:gsub("%z", "\\0"):sub(1, 2000)
+        return src:gsub("%z","\\0"):sub(1,2000)
     end
     return nil
 end
@@ -34,18 +34,18 @@ local function testGetConnections()
 end
 
 local function safeIdentify(fn)
-    if not fn then return "~nil", "nil", "?" end
+    if not fn then return "~nil","nil","?" end
     if has.iscclosure then
         local isC = false
         pcall(function() isC = iscclosure(fn) end)
-        if isC then return "~C_closure", "C_closure", "C" end
+        if isC then return "~C_closure","C_closure","C" end
     end
-    local p, n, cl = "unknown", "unknown", "?"
-    pcall(function() p, n, cl = Decomp.identifyScript(fn) end)
-    return p, n, cl
+    local p,n,cl = "unknown","unknown","?"
+    pcall(function() p,n,cl = Decomp.identifyScript(fn) end)
+    return p,n,cl
 end
 
--- ══ METATABLE HOOKS ══
+-- ══ METATABLE HOOKS — all modes ══
 local function analyzeMetatable()
     if not has.getrawmetatable then return end
     C.safeScan("MT_Hooks", function()
@@ -67,9 +67,7 @@ local function analyzeMetatable()
                             if not c then return end
                             local strs = {}
                             for _, v in ipairs(c) do
-                                if type(v) == "string" and #v > 0 and #v < 60 then
-                                    strs[#strs+1] = v
-                                end
+                                if type(v) == "string" and #v > 0 and #v < 60 then strs[#strs+1] = v end
                             end
                             if #strs > 0 then h.constants = strs end
                         end)
@@ -84,12 +82,10 @@ local function analyzeMetatable()
     end)
 end
 
--- ══ REMOTE CALLBACKS ══
+-- ══ REMOTE CALLBACKS — all modes ══
 local function analyzeRemoteCallbacks()
     if not has.getcallbackvalue then return end
-    if D.limits.skipHooks then return end
-
-    local svcs = {"ReplicatedStorage","Workspace","StarterGui"}
+    local svcs = {"ReplicatedStorage","Workspace","StarterGui","Lighting","StarterPack","StarterPlayer"}
     for _, svcName in ipairs(svcs) do
         if D.S.cancel then break end
         C.safeScan("RemCB:"..svcName, function()
@@ -124,7 +120,7 @@ local function analyzeRemoteCallbacks()
                     D.S.hooks[#D.S.hooks+1] = h
                     D.S.stats.hooks = D.S.stats.hooks + 1
                 end)
-                if batch % 30 == 0 then C.yieldNow() end
+                if batch % 20 == 0 then C.yieldNow() end
                 C.tick()
             end
             desc = nil
@@ -133,43 +129,34 @@ local function analyzeRemoteCallbacks()
     end
 end
 
--- ══ CONNECTION SPY ══
+-- ══ CONNECTION SPY — all modes, per-signal isolation ══
 local function analyzeConnections()
-    if D.limits.skipConnSpy then return end
-
     local gcOk = testGetConnections()
     if not gcOk then
-        D.UI:Log("    ⚠ getconnections pre-flight failed", "yellow")
-        D.S.scanErrors[#D.S.scanErrors+1] = { section="ConnSpy", error="pre-flight failed" }
+        D.UI:Log("    ⚠ getconnections pre-flight failed","yellow")
+        D.S.scanErrors[#D.S.scanErrors+1] = {section="ConnSpy", error="pre-flight failed"}
         return
     end
 
-    local m = D.cfg.mode or "normal"
+    -- ALL signals in ALL modes
     local signals = {}
-    pcall(function() signals[#signals+1] = {name="Heartbeat",   sig=C.Run.Heartbeat} end)
-    pcall(function() signals[#signals+1] = {name="Stepped",     sig=C.Run.Stepped} end)
-    pcall(function() signals[#signals+1] = {name="PlayerAdded", sig=C.Players.PlayerAdded} end)
-
-    if m == "normal" or m == "turbo" then
-        pcall(function() signals[#signals+1] = {name="RenderStepped", sig=C.Run.RenderStepped} end)
-        pcall(function() signals[#signals+1] = {name="InputBegan",    sig=C.UIS.InputBegan} end)
-        pcall(function() signals[#signals+1] = {name="InputEnded",    sig=C.UIS.InputEnded} end)
-        pcall(function() signals[#signals+1] = {name="CharAdded",     sig=C.LP.CharacterAdded} end)
-        pcall(function() signals[#signals+1] = {name="Chatted",       sig=C.LP.Chatted} end)
-    end
-
-    if m == "turbo" then
-        pcall(function() signals[#signals+1] = {name="InputChanged",   sig=C.UIS.InputChanged} end)
-        pcall(function() signals[#signals+1] = {name="CharRemoving",   sig=C.LP.CharacterRemoving} end)
-        pcall(function() signals[#signals+1] = {name="WS.ChildAdded",  sig=workspace.ChildAdded} end)
-        pcall(function() signals[#signals+1] = {name="PlayerRemoving", sig=C.Players.PlayerRemoving} end)
-        pcall(function()
-            signals[#signals+1] = {name="RS.ChildAdded", sig=game:GetService("ReplicatedStorage").ChildAdded}
-        end)
-    end
+    pcall(function() signals[#signals+1] = {name="Heartbeat",      sig=C.Run.Heartbeat} end)
+    pcall(function() signals[#signals+1] = {name="Stepped",        sig=C.Run.Stepped} end)
+    pcall(function() signals[#signals+1] = {name="PlayerAdded",    sig=C.Players.PlayerAdded} end)
+    pcall(function() signals[#signals+1] = {name="RenderStepped",  sig=C.Run.RenderStepped} end)
+    pcall(function() signals[#signals+1] = {name="InputBegan",     sig=C.UIS.InputBegan} end)
+    pcall(function() signals[#signals+1] = {name="InputEnded",     sig=C.UIS.InputEnded} end)
+    pcall(function() signals[#signals+1] = {name="InputChanged",   sig=C.UIS.InputChanged} end)
+    pcall(function() signals[#signals+1] = {name="CharAdded",      sig=C.LP.CharacterAdded} end)
+    pcall(function() signals[#signals+1] = {name="CharRemoving",   sig=C.LP.CharacterRemoving} end)
+    pcall(function() signals[#signals+1] = {name="Chatted",        sig=C.LP.Chatted} end)
+    pcall(function() signals[#signals+1] = {name="WS.ChildAdded",  sig=workspace.ChildAdded} end)
+    pcall(function() signals[#signals+1] = {name="PlayerRemoving", sig=C.Players.PlayerRemoving} end)
+    pcall(function() signals[#signals+1] = {name="RS.ChildAdded",  sig=game:GetService("ReplicatedStorage").ChildAdded} end)
 
     for _, def in ipairs(signals) do
         if D.S.cancel then break end
+        -- Each signal: isolated pcall
         pcall(function()
             local connOk, conns = pcall(getconnections, def.sig)
             if not connOk or not conns then return end
@@ -178,7 +165,7 @@ local function analyzeConnections()
                 pcall(function()
                     local conn = conns[ci]
                     if not conn then return end
-                    local sPath, sName, sCls = "unknown", "unknown", "?"
+                    local sPath, sName, sCls = "unknown","unknown","?"
                     local fType, enabled = "nil", true
                     pcall(function() enabled = conn.Enabled ~= false end)
                     if conn.Function then
@@ -198,17 +185,12 @@ end
 
 -- ══ ENTRY POINT ══
 function M.analyze()
-    -- Safe mode: skip hooks entirely
-    if D.limits.skipHooks and D.limits.skipConnSpy then
-        D.UI:Log("  → hooks skipped (safe mode)", "gray")
-        return
-    end
-
-    D.UI:Log("  → hooks & connections", "orange")
+    D.UI:Log("  → hooks & connections (ALL modes)", "orange")
 
     if not C.memoryGuard() then
-        D.UI:Log("  ⚠ Memory too high, skipping hooks", "red")
-        return
+        D.UI:Log("  ⚠ Memory too high — pausing 2s","red")
+        task.wait(2)
+        C.memoryGuard()
     end
 
     decompBudget = D.limits.hookDecompBudget

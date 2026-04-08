@@ -2,7 +2,6 @@ return function(D)
 local C = {}
 D.Core = C
 
--- ══ SERVICES ══
 C.Players = game:GetService("Players")
 C.Run     = game:GetService("RunService")
 C.Http    = game:GetService("HttpService")
@@ -10,70 +9,64 @@ C.UIS     = game:GetService("UserInputService")
 C.Tags    = game:GetService("CollectionService")
 C.LP      = C.Players.LocalPlayer
 
--- ══ MODE CONFIG — redesigned ══
+-- ══ MODE CONFIG — nothing is skipped, only protection level changes ══
 C.MODES = {
     safe = {
-        yieldEvery       = 2,
-        gcLimit          = 2000,
-        decompileTimeout = 30,
-        maxNilDepth      = 4,
-        hooksPerService  = 0,
-        connLimit        = 0,
-        hookDecompBudget = 0,
-        maxDescendants   = 600,
-        skipAdvanced     = true,
-        skipGC           = true,
-        skipRegistry     = true,
-        skipThreads      = true,
-        skipHooks        = true,
-        skipConnSpy      = true,
-        batchSize        = 1,
-        memCheckEvery    = 4,
-        gcStepSize       = 20,
-        chunkProcess     = 50,
-        cacheHitBatch    = 6,
+        yieldEvery       = 2,       -- yield very often
+        gcLimit          = 80000,   -- still scan a LOT
+        decompileTimeout = 30,      -- patient decompile
+        maxNilDepth      = 3,       -- 3 levels deep
+        hooksPerService  = 500,     -- scan all hooks
+        connLimit        = 15,      -- all connections
+        hookDecompBudget = 10,      -- some decompile budget
+        maxDescendants   = 50000,   -- large scan
+        batchSize        = 1,       -- process 1 at a time
+        memCheckEvery    = 3,       -- very frequent mem checks
+        gcStepSize       = 30,      -- gentle GC
+        chunkProcess     = 30,      -- small chunks with pcall each
+        cacheHitBatch    = 4,       -- yield often even on cache
+        upvalueDepth     = 4,       -- upvalue chain depth
+        maxTags          = 500,     -- tag scan limit
+        maxModTrace      = 600,     -- module trace limit
+        logEvery         = 8,       -- log frequency
     },
     normal = {
         yieldEvery       = 12,
-        gcLimit          = 30000,
+        gcLimit          = 60000,
         decompileTimeout = 12,
-        maxNilDepth      = 20,
-        hooksPerService  = 300,
-        connLimit        = 8,
-        hookDecompBudget = 15,
-        maxDescendants   = 10000,
-        skipAdvanced     = false,
-        skipGC           = false,
-        skipRegistry     = false,
-        skipThreads      = false,
-        skipHooks        = false,
-        skipConnSpy      = false,
+        maxNilDepth      = 3,
+        hooksPerService  = 600,
+        connLimit        = 12,
+        hookDecompBudget = 25,
+        maxDescendants   = 30000,
         batchSize        = 3,
-        memCheckEvery    = 20,
+        memCheckEvery    = 15,
         gcStepSize       = 100,
         chunkProcess     = 150,
         cacheHitBatch    = 20,
+        upvalueDepth     = 5,
+        maxTags          = 500,
+        maxModTrace      = 600,
+        logEvery         = 10,
     },
     turbo = {
         yieldEvery       = 80,
-        gcLimit          = 120000,
+        gcLimit          = 150000,
         decompileTimeout = 5,
-        maxNilDepth      = 50,
-        hooksPerService  = 1000,
-        connLimit        = 25,
+        maxNilDepth      = 4,
+        hooksPerService  = 1200,
+        connLimit        = 30,
         hookDecompBudget = 80,
-        maxDescendants   = 80000,
-        skipAdvanced     = false,
-        skipGC           = false,
-        skipRegistry     = false,
-        skipThreads      = false,
-        skipHooks        = false,
-        skipConnSpy      = false,
+        maxDescendants   = 100000,
         batchSize        = 12,
         memCheckEvery    = 60,
         gcStepSize       = 250,
-        chunkProcess     = 400,
-        cacheHitBatch    = 50,
+        chunkProcess     = 500,
+        cacheHitBatch    = 60,
+        upvalueDepth     = 7,
+        maxTags          = 800,
+        maxModTrace      = 1000,
+        logEvery         = 25,
     },
 }
 
@@ -112,17 +105,17 @@ pcall(function()
 end)
 if not D.base64enc then pcall(function() D.base64enc = getfenv().base64encode end) end
 
--- ══ CACHE (persists between dumps) ══
 D.cache = D.cache or { bytecode={}, linked={} }
 
--- ══ REMOTE CLASS LUT (hoisted for speed) ══
 local REM_CLS = {
     RemoteEvent=true, RemoteFunction=true, BindableEvent=true,
     BindableFunction=true, UnreliableRemoteEvent=true,
 }
 C.REM_CLS = REM_CLS
 
--- ══ STATE RESET ══
+local SCRIPT_CLS = {LocalScript=true, ModuleScript=true, Script=true}
+C.SCRIPT_CLS = SCRIPT_CLS
+
 function C.resetState()
     local cfg = D.cfg
     local mode = cfg.mode or "normal"
@@ -158,24 +151,24 @@ end
 
 function C.memoryGuard()
     local mem = C.getMemKB()
-    if mem > 700000 then
-        pcall(collectgarbage,"collect"); task.wait(1.0)
-        D.UI:Log("⚠ Mem critical: "..math.floor(mem/1024).."MB","red")
-        return false
-    elseif mem > 450000 then
-        pcall(collectgarbage,"step", D.limits.gcStepSize * 2); task.wait(0.2)
-    elseif mem > 300000 then
+    if mem > 800000 then
+        pcall(collectgarbage,"collect"); task.wait(1.2)
+        D.UI:Log("⚠ Mem critical: "..math.floor(mem/1024).."MB — cleaning","red")
+        mem = C.getMemKB()
+        if mem > 750000 then return false end
+    elseif mem > 500000 then
+        pcall(collectgarbage,"step", D.limits.gcStepSize * 3); task.wait(0.3)
+    elseif mem > 350000 then
         pcall(collectgarbage,"step", D.limits.gcStepSize)
     end
     return true
 end
 
--- ══ YIELD — mode-adaptive ══
+-- ══ YIELD ══
 function C.tick()
     D.S.yc = D.S.yc + 1
     if D.S.yc >= D.limits.yieldEvery then
-        D.S.yc = 0
-        task.wait()
+        D.S.yc = 0; task.wait()
     end
 end
 
@@ -183,12 +176,20 @@ function C.yieldNow()
     D.S.yc = 0; task.wait()
 end
 
--- Turbo: yield only every N ticks (bulk check)
 function C.tickBulk(n)
     D.S.yc = D.S.yc + (n or 1)
     if D.S.yc >= D.limits.yieldEvery then
         D.S.yc = 0; task.wait()
     end
+end
+
+-- Safe: yield + memory check combo
+function C.safeTick(counter)
+    C.tick()
+    if counter and counter % D.limits.memCheckEvery == 0 then
+        return C.memoryGuard()
+    end
+    return true
 end
 
 -- ══ SAFE SCAN ══
@@ -216,7 +217,7 @@ function C.timedCall(fn, timeout, ...)
     local t0 = os.clock()
     while not done do
         if os.clock()-t0 > timeout then return false, "Timeout" end
-        task.wait(0.1)
+        task.wait(0.08)
     end
     return rok, rval
 end
@@ -248,7 +249,7 @@ function C.push()
     D.UI:SetProgress(D.S.stats.ok+D.S.stats.fail, math.max(D.S.stats.queued,1))
 end
 
--- ══ HASH — fast path ══
+-- ══ HASH ══
 function C.computeHash(data)
     if not data or #data==0 then return nil end
     if D.hasCrypt then
@@ -257,8 +258,7 @@ function C.computeHash(data)
     end
     local h1,h2,h3 = 0x811c9dc5, 0x01000193, 0x9e3779b9
     local len = #data
-    -- sample for very large data (turbo speed)
-    local step = len > 50000 and math.floor(len/20000) or 1
+    local step = len > 80000 and math.floor(len/30000) or 1
     for i = 1, len, step do
         local b = string.byte(data,i)
         h1 = bit32.bxor(h1,b); h1 = bit32.band(h1*0x01000193, 0xFFFFFFFF)
@@ -275,9 +275,7 @@ function C.getScriptHash(obj)
     return #bc==0 and "EMPTY" or C.computeHash(bc)
 end
 
--- ══ FILTERS — optimized with LUT ══
-local SCRIPT_CLS = {LocalScript=true, ModuleScript=true}
-
+-- ══ FILTERS ══
 function C.isServerScript(obj)
     local okC,cn = pcall(function() return obj.ClassName end)
     if not okC then return false end
@@ -291,7 +289,7 @@ end
 function C.isScript(obj)
     if not obj then return false end
     local ok,cn = pcall(function() return obj.ClassName end)
-    if not ok or not SCRIPT_CLS[cn] then return false end
+    if not ok then return false end
     if cn=="LocalScript" then
         if not D.cfg.dumpLocal then return false end
         if not D.cfg.dumpDisabled then
@@ -300,11 +298,8 @@ function C.isScript(obj)
         end
         return true
     end
-    return D.cfg.dumpModule
+    return cn=="ModuleScript" and D.cfg.dumpModule
 end
-
--- Inline class check (avoid function call overhead in hot paths)
-C.SCRIPT_CLS = SCRIPT_CLS
 
 -- ══ FILE SYSTEM ══
 function C.ensureDir(p)
@@ -340,7 +335,7 @@ function C.buildFilePath(obj)
     return folder, fileName
 end
 
--- ══ ENQUEUE — fast path for turbo ══
+-- ══ ENQUEUE ══
 function C.enqueue(obj, from)
     local id = tostring(obj)
     if D.S.seen[id] then D.S.stats.skip=D.S.stats.skip+1; return end
@@ -359,11 +354,6 @@ function C.enqueue(obj, from)
         elseif bcHash and D.S.seenHash[bcHash] then
             D.S.cacheStats.dedup=D.S.cacheStats.dedup+1
             D.S.stats.dedup=(D.S.stats.dedup or 0)+1
-            -- In turbo: still enqueue (dedup logged, cache handles it)
-            -- In safe/normal: skip duplicate bytecode
-            if D.cfg.mode ~= "turbo" then
-                -- don't skip — we still want the file, cache will handle it fast
-            end
         end
         if bcHash and bcHash~="EMPTY" then D.S.seenHash[bcHash]=true end
     end
@@ -383,7 +373,7 @@ function C.enqueue(obj, from)
     D.S.queue[#D.S.queue+1] = {inst=obj, from=from, bcHash=bcHash}
 end
 
--- ══ CHECK REMOTE — early bail ══
+-- ══ CHECK REMOTE ══
 function C.checkRemote(obj)
     if not D.cfg.dumpRemotes then return end
     local ok,cn = pcall(function() return obj.ClassName end)
@@ -391,7 +381,6 @@ function C.checkRemote(obj)
     local id = tostring(obj)
     if D.S.remoteSeen[id] then return end
     D.S.remoteSeen[id]=true
-
     pcall(function()
         local info = {
             class=cn, name=obj.Name, path=C.safeName(obj),
@@ -421,18 +410,14 @@ function C.checkRemote(obj)
     end)
 end
 
--- ══ PROCESS LIST — mode-adaptive ══
+-- ══ PROCESS LIST — mode-adaptive, NEVER skips ══
 function C.processObjList(list, from, maxCount)
     if not list or #list == 0 then return end
     local max = math.min(#list, maxCount or D.limits.maxDescendants)
     local mode = D.cfg.mode or "normal"
     local dumpRemotes = D.cfg.dumpRemotes
-    local dumpLocal = D.cfg.dumpLocal
-    local dumpModule = D.cfg.dumpModule
-    local dumpDisabled = D.cfg.dumpDisabled
 
     if mode == "turbo" then
-        -- TURBO: chunk-based pcall, minimal overhead
         local chunk = D.limits.chunkProcess
         for start = 1, max, chunk do
             if D.S.cancel then return end
@@ -441,31 +426,14 @@ function C.processObjList(list, from, maxCount)
                 for i = start, stop do
                     local obj = list[i]
                     if obj then
-                        local ok2, cn = pcall(function() return obj.ClassName end)
-                        if ok2 then
-                            if cn == "ModuleScript" then
-                                if dumpModule then C.enqueue(obj, from) end
-                            elseif cn == "LocalScript" then
-                                if dumpLocal then
-                                    if dumpDisabled then
-                                        C.enqueue(obj, from)
-                                    else
-                                        local ok3, en = pcall(function() return obj.Enabled end)
-                                        if not ok3 or en then C.enqueue(obj, from) end
-                                    end
-                                end
-                            end
-                            if dumpRemotes and REM_CLS[cn] then
-                                C.checkRemote(obj)
-                            end
-                        end
+                        if C.isScript(obj) then C.enqueue(obj, from) end
+                        if dumpRemotes then C.checkRemote(obj) end
                     end
                 end
             end)
             C.tickBulk(chunk)
         end
     elseif mode == "safe" then
-        -- SAFE: per-item pcall, frequent yields
         for i = 1, max do
             if D.S.cancel then return end
             pcall(function()
@@ -473,20 +441,15 @@ function C.processObjList(list, from, maxCount)
                 if C.isScript(obj) then C.enqueue(obj, from) end
                 if dumpRemotes then C.checkRemote(obj) end
             end)
-            C.tick()
-            -- Extra memory safety
-            if i % D.limits.memCheckEvery == 0 then
-                if not C.memoryGuard() then return end
-            end
+            if not C.safeTick(i) then return end
         end
     else
-        -- NORMAL: balanced
         for i = 1, max do
             if D.S.cancel then return end
             pcall(function()
                 local obj = list[i]
                 if C.isScript(obj) then C.enqueue(obj, from) end
-                C.checkRemote(obj)
+                if dumpRemotes then C.checkRemote(obj) end
             end)
             C.tick()
         end
