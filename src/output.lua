@@ -5,71 +5,239 @@ local C = D.Core
 
 local function w(path, data) C.writeFile(path, data) end
 
--- ══ REMOTE GUIDE ══
+-- ══════════════════════════════════
+--  REMOTE GUIDE v2 — DETAILED
+-- ══════════════════════════════════
+
+local function getRemoteUsage(r)
+    if r.class == "RemoteEvent" then
+        return r.path..":FireServer(args...)"
+    elseif r.class == "RemoteFunction" then
+        return "local result = "..r.path..":InvokeServer(args...)"
+    elseif r.class == "UnreliableRemoteEvent" then
+        return r.path..":FireServer(args...)  -- unreliable/UDP"
+    elseif r.class == "BindableEvent" then
+        return r.path..":Fire(args...)"
+    elseif r.class == "BindableFunction" then
+        return "local result = "..r.path..":Invoke(args...)"
+    end
+    return r.path..":Fire()"
+end
+
+local function getRemoteDescription(r)
+    local desc = {}
+    if r.class == "RemoteEvent" then
+        desc[#desc+1] = "-- │ Type: RemoteEvent — client→server one-way communication"
+        desc[#desc+1] = "-- │ Client calls :FireServer(...) to send data to the server."
+        desc[#desc+1] = "-- │ Server receives via .OnServerEvent:Connect(function(player, ...) end)"
+        desc[#desc+1] = "-- │ Server can fire back via :FireClient(player, ...) or :FireAllClients(...)"
+    elseif r.class == "RemoteFunction" then
+        desc[#desc+1] = "-- │ Type: RemoteFunction — client↔server two-way request/response"
+        desc[#desc+1] = "-- │ Client calls :InvokeServer(...) → waits for server response."
+        desc[#desc+1] = "-- │ Server handles via .OnServerInvoke = function(player, ...) return ... end"
+        desc[#desc+1] = "-- │ ⚠ InvokeServer YIELDS — the client thread pauses until server responds."
+    elseif r.class == "UnreliableRemoteEvent" then
+        desc[#desc+1] = "-- │ Type: UnreliableRemoteEvent — fast but lossy UDP communication"
+        desc[#desc+1] = "-- │ Same as RemoteEvent but uses UDP — packets may be dropped."
+        desc[#desc+1] = "-- │ Used for high-frequency data (positions, rotations) where loss is OK."
+        desc[#desc+1] = "-- │ Smaller payload limit than regular RemoteEvent."
+    elseif r.class == "BindableEvent" then
+        desc[#desc+1] = "-- │ Type: BindableEvent — same-context (client↔client) event"
+        desc[#desc+1] = "-- │ Fire with :Fire(...), listen with .Event:Connect(function(...) end)"
+        desc[#desc+1] = "-- │ Does NOT cross client/server boundary — local communication only."
+    elseif r.class == "BindableFunction" then
+        desc[#desc+1] = "-- │ Type: BindableFunction — same-context request/response"
+        desc[#desc+1] = "-- │ Call with :Invoke(...), handle with .OnInvoke = function(...) return ... end"
+        desc[#desc+1] = "-- │ Does NOT cross client/server boundary — local communication only."
+    end
+    return desc
+end
+
 local function saveRemoteGuide()
     if #D.S.remotes == 0 then return end
+
     local cats = {
-        RemoteEvent           = {t="REMOTE EVENTS (FireServer)",      items={}},
-        RemoteFunction        = {t="REMOTE FUNCTIONS (InvokeServer)", items={}},
-        UnreliableRemoteEvent = {t="UNRELIABLE REMOTE EVENTS",        items={}},
-        BindableEvent         = {t="BINDABLE EVENTS",                 items={}},
-        BindableFunction      = {t="BINDABLE FUNCTIONS",              items={}},
+        RemoteEvent           = {t="REMOTE EVENTS (FireServer)",      items={}, order=1},
+        RemoteFunction        = {t="REMOTE FUNCTIONS (InvokeServer)", items={}, order=2},
+        UnreliableRemoteEvent = {t="UNRELIABLE REMOTE EVENTS (UDP)",  items={}, order=3},
+        BindableEvent         = {t="BINDABLE EVENTS (local)",         items={}, order=4},
+        BindableFunction      = {t="BINDABLE FUNCTIONS (local)",      items={}, order=5},
     }
     for _, r in ipairs(D.S.remotes) do
         local cat = cats[r.class]
         if cat then cat.items[#cat.items+1] = r end
     end
+
     local L = {
-        "-- ╔════════════════════════════════════╗",
-        "-- ║   REMOTE GUIDE — Dumper Pro v13    ║",
-        "-- ║   "..D.cfg.folder,
-        "-- ║   "..os.date("%Y-%m-%d %H:%M:%S"),
-        "-- ║   Total: "..#D.S.remotes,
-        "-- ╚════════════════════════════════════╝","",
+        "-- ╔══════════════════════════════════════════════════╗",
+        "-- ║  ██████╗ ██╗   ██╗███╗   ███╗██████╗ ███████╗  ║",
+        "-- ║  ██╔══██╗██║   ██║████╗ ████║██╔══██╗██╔════╝  ║",
+        "-- ║  ██║  ██║██║   ██║██╔████╔██║██████╔╝█████╗    ║",
+        "-- ║  ██║  ██║██║   ██║██║╚██╔╝██║██╔═══╝ ██╔══╝    ║",
+        "-- ║  ██████╔╝╚██████╔╝██║ ╚═╝ ██║██║     ███████╗  ║",
+        "-- ║  ╚═════╝  ╚═════╝ ╚═╝     ╚═╝╚═╝     ╚══════╝  ║",
+        "-- ║        REMOTE GUIDE — PRO v14                    ║",
+        "-- ╚══════════════════════════════════════════════════╝",
+        "-- Game: "..D.cfg.folder,
+        "-- Date: "..os.date("%Y-%m-%d %H:%M:%S"),
+        "-- Total Remotes: "..#D.S.remotes,
+        "",
+        "-- ═══════════════════════════════════════════════════",
+        "-- HOW TO READ THIS GUIDE:",
+        "-- • Each remote shows its full path, type, and usage example",
+        "-- • Argument info is inferred from connected handler functions",
+        "-- • Connection count shows how many scripts listen to this remote",
+        "-- • Constants show string values used inside handler functions",
+        "-- ═══════════════════════════════════════════════════",
+        "",
     }
-    for _, cat in pairs(cats) do
+
+    -- Sort categories by order
+    local sortedCats = {}
+    for _, cat in pairs(cats) do sortedCats[#sortedCats+1] = cat end
+    table.sort(sortedCats, function(a,b) return a.order < b.order end)
+
+    for _, cat in ipairs(sortedCats) do
         if #cat.items > 0 then
-            L[#L+1] = "-- ══ "..cat.t.." ("..#cat.items..") ══"
+            L[#L+1] = "-- ╔═══════════════════════════════════════════════╗"
+            L[#L+1] = "-- ║ "..cat.t.." ("..#cat.items..")"
+            L[#L+1] = "-- ╚═══════════════════════════════════════════════╝"
             L[#L+1] = ""
-            for _, r in ipairs(cat.items) do
-                L[#L+1] = "-- ┌ "..r.name
+
+            for ri, r in ipairs(cat.items) do
+                L[#L+1] = "-- ┌─────────────────────────────────────────────────"
+                L[#L+1] = "-- │ #"..ri.." "..r.class..': "'..r.name..'"'
                 L[#L+1] = "-- │ Path: "..r.path
                 L[#L+1] = "-- │ Parent: "..r.parent
-                if r.class=="RemoteEvent" then
-                    L[#L+1] = "-- │ ► "..r.path..":FireServer()"
-                elseif r.class=="RemoteFunction" then
-                    L[#L+1] = "-- │ ► local r = "..r.path..":InvokeServer()"
-                end
+                L[#L+1] = "-- │"
+
+                -- Type description
+                local descLines = getRemoteDescription(r)
+                for _, dl in ipairs(descLines) do L[#L+1] = dl end
+                L[#L+1] = "-- │"
+
+                -- Usage
+                L[#L+1] = "-- │ ► HOW TO USE:"
+                L[#L+1] = "-- │   "..getRemoteUsage(r)
+                L[#L+1] = "-- │"
+
+                -- Argument info from callbacks
                 if #r.callbacks > 0 then
+                    L[#L+1] = "-- │ ► CALLBACKS/HANDLERS: "..#r.callbacks
                     for _, cb in ipairs(r.callbacks) do
-                        L[#L+1] = "-- │   ["..cb.name.."] "..cb.type
+                        L[#L+1] = "-- │   ["..cb.name.."] type="..cb.type
+                        if cb.numParams then
+                            L[#L+1] = "-- │     Arguments: "..cb.numParams..(cb.isVararg and " + varargs (...)" or "")
+                            -- Generate argument placeholders
+                            local argStr = {}
+                            for ai = 1, cb.numParams do argStr[ai] = "arg"..ai end
+                            if cb.isVararg then argStr[#argStr+1] = "..." end
+                            L[#L+1] = "-- │     Signature: function("..table.concat(argStr, ", ")..")"
+                        end
+                        if cb.constants and #cb.constants > 0 then
+                            L[#L+1] = "-- │     Constants used: "..table.concat(cb.constants, ", "):sub(1,200)
+                            -- Infer argument types from constants
+                            local hasTypeOf = false
+                            local hasToNumber = false
+                            for _, c in ipairs(cb.constants) do
+                                if c == "typeof" or c == "type" then hasTypeOf = true end
+                                if c == "tonumber" then hasToNumber = true end
+                            end
+                            if hasTypeOf then
+                                L[#L+1] = "-- │     ⚡ Handler uses type-checking (typeof/type)"
+                            end
+                            if hasToNumber then
+                                L[#L+1] = "-- │     ⚡ Handler converts to number (tonumber)"
+                            end
+                        end
                     end
+                    L[#L+1] = "-- │"
                 end
-                L[#L+1] = "-- └───────────────────"
+
+                -- Connection count
+                if r.connectionCount and r.connectionCount > 0 then
+                    L[#L+1] = "-- │ ► ACTIVE CONNECTIONS: "..r.connectionCount
+                    L[#L+1] = "-- │"
+                end
+
+                L[#L+1] = "-- └─────────────────────────────────────────────────"
                 L[#L+1] = ""
             end
         end
     end
+
     w(D.S.rootDir.."/RemoteGuide.lua", table.concat(L,"\n"))
-    D.UI:Log("Saved RemoteGuide.lua ("..#D.S.remotes..")", "green")
+    D.UI:Log("Saved RemoteGuide.lua ("..#D.S.remotes.." remotes, detailed)", "green")
 end
 
--- ══ HOOKS ══
+-- ══ HOOKS — enhanced ══
 local function saveHooks()
     if #D.S.hooks == 0 then return end
-    local L = {"HOOK ANALYSIS — "..#D.S.hooks.." found",""}
+    local L = {
+        "╔══════════════════════════════════════════════════╗",
+        "║  HOOK ANALYSIS — Dumper Pro v14                  ║",
+        "║  "..#D.S.hooks.." hooks detected                            ║",
+        "║  "..os.date("%Y-%m-%d %H:%M:%S").."                           ║",
+        "╚══════════════════════════════════════════════════╝",
+        "",
+    }
+
+    -- Group by status
+    local hooked, original, unknown = {}, {}, {}
     for _, h in ipairs(D.S.hooks) do
-        L[#L+1] = "━━━━━━━━━━━━━━━━━━━"
-        L[#L+1] = "Type:   "..h.type
-        L[#L+1] = "Status: "..h.status
-        L[#L+1] = "Detail: "..h.detail
-        if h.scriptSource then L[#L+1] = "Script: "..h.scriptSource end
-        if h.constants then L[#L+1] = "Consts: "..table.concat(h.constants,", ") end
-        if h.source then L[#L+1] = "Source:\n"..h.source end
+        if h.status == "HOOKED" then hooked[#hooked+1] = h
+        elseif h.status == "original" then original[#original+1] = h
+        else unknown[#unknown+1] = h end
+    end
+
+    if #hooked > 0 then
+        L[#L+1] = "══ ⚠ HOOKED ("..#hooked..") — These have been modified ══"
+        L[#L+1] = ""
+        for _, h in ipairs(hooked) do
+            L[#L+1] = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            L[#L+1] = "Type:    "..h.type
+            L[#L+1] = "Status:  ⚠ HOOKED"
+            L[#L+1] = "Detail:  "..h.detail
+            if h.scriptSource then L[#L+1] = "Script:  "..h.scriptSource end
+            if h.wrappedOriginal then L[#L+1] = "Wraps:   "..h.wrappedOriginal end
+            if h.debugInfo then
+                local di = h.debugInfo
+                if di.name then L[#L+1] = "FuncName: "..di.name end
+                if di.source then L[#L+1] = "Source:   "..di.source end
+                if di.numParams then L[#L+1] = "Params:   "..di.numParams end
+                if di.lineStart then L[#L+1] = "Lines:    "..di.lineStart.."-"..(di.lineEnd or "?") end
+            end
+            if h.constants then L[#L+1] = "Consts:  "..table.concat(h.constants,", ") end
+            if h.upvalues then
+                L[#L+1] = "Upvalues:"
+                for _, uv in ipairs(h.upvalues) do L[#L+1] = "  "..uv end
+            end
+            if h.source then L[#L+1] = "Source:\n"..h.source end
+            L[#L+1] = ""
+        end
+    end
+
+    if #original > 0 then
+        L[#L+1] = "══ ✓ ORIGINAL ("..#original..") — Not modified ══"
+        L[#L+1] = ""
+        for _, h in ipairs(original) do
+            L[#L+1] = "  ✓ "..h.type.." — "..h.detail
+        end
         L[#L+1] = ""
     end
+
+    if #unknown > 0 then
+        L[#L+1] = "══ ? UNKNOWN ("..#unknown..") ══"
+        L[#L+1] = ""
+        for _, h in ipairs(unknown) do
+            L[#L+1] = "  ? "..h.type.." — "..h.detail
+            if h.source then L[#L+1] = "    Source:\n"..h.source end
+        end
+        L[#L+1] = ""
+    end
+
     w(D.S.rootDir.."/HookAnalysis.txt", table.concat(L,"\n"))
-    D.UI:Log("Saved HookAnalysis.txt", "green")
+    D.UI:Log("Saved HookAnalysis.txt ("..#hooked.." hooked, "..#original.." original)", "green")
 end
 
 -- ══ CONNECTIONS ══
@@ -162,7 +330,7 @@ local function saveGameInfo()
     local s = D.S.stats
     local L = {}
     L[#L+1] = "═══════════════════════════"
-    L[#L+1] = "DUMPER PRO v13 — REPORT"
+    L[#L+1] = "DUMPER PRO v14 — REPORT"
     L[#L+1] = "═══════════════════════════"
     L[#L+1] = ""
     L[#L+1] = "Game:    "..D.cfg.folder
@@ -172,7 +340,7 @@ local function saveGameInfo()
     L[#L+1] = "Date:    "..os.date("%Y-%m-%d %H:%M:%S")
     L[#L+1] = "Player:  "..C.LP.Name
     L[#L+1] = "Mode:    "..(D.cfg.mode or "normal")
-    L[#L+1] = "Memory:  "..math.floor(C.getMemKB()/1024).."MB"
+    L[#L+1] = "Memory:  "..C.getMemMB().."MB"
     pcall(function() L[#L+1] = "Exec:    "..(identifyexecutor() or "?") end)
     L[#L+1] = ""
     L[#L+1] = "── CAPABILITIES ──"
@@ -228,7 +396,7 @@ local function saveSingleFile()
     if not D.S.isSingleFile or #D.S.singleBuffer == 0 then return end
     local header = {
         "-- ═══════════════════════════════════",
-        "-- DUMPER PRO v13 — SINGLE FILE",
+        "-- DUMPER PRO v14 — SINGLE FILE",
         "-- Game: "..D.cfg.folder,
         "-- Date: "..os.date("%Y-%m-%d %H:%M:%S"),
         "-- Scripts: "..D.S.stats.ok,

@@ -1,6 +1,6 @@
 --[[
-    DUMPER PRO v13 — Loader
-    ALL scanners active in ALL modes.
+    DUMPER PRO v14 — Loader
+    Game freeze + anti-crash + deep discovery + 11 decompile strategies
     Safe = crash-proof. Turbo = max speed. Same coverage.
 ]]
 

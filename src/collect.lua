@@ -985,69 +985,365 @@ local function deepUpvalueChain()
 end
 
 -- ══════════════════════════════════
---  ORCHESTRATOR
+--  v14: GC CLOSURES DEEP SCAN
+-- ══════════════════════════════════
+
+local function scanGCClosuresDeep()
+    if not has.getgc then return end
+    local found = 0
+    C.safeScan("GCClosuresDeep", function()
+        D.UI:Log("  → gcClosuresDeep() [v14]", "orange")
+        C.deepClean()
+        local ok, gc = C.dangerousCall("gc_cls_deep", getgc, false)
+        if not ok or not gc then return end
+        local sz = math.min(#gc, D.limits.gcLimit)
+        local chunk = isTurbo() and 400 or (isSafe() and 30 or 150)
+        for start = 1, sz, chunk do
+            if D.S.cancel then break end
+            pcall(function()
+                local stop = math.min(start + chunk - 1, sz)
+                for i = start, stop do
+                    if type(gc[i]) == "function" then
+                        pcall(function()
+                            local e = getfenv(gc[i])
+                            if e then
+                                local s = rawget(e, "script")
+                                if s and typeof(s) == "Instance" and C.isScript(s) then
+                                    C.enqueue(s, "gc_closure_deep"); found = found + 1
+                                end
+                            end
+                        end)
+                        if has["debug.getinfo"] then
+                            pcall(function()
+                                local di = debug.getinfo(gc[i])
+                                if di and di.source then
+                                    local src = tostring(di.source)
+                                    if src:sub(1,1) == "=" then
+                                        local sName = src:sub(2)
+                                        pcall(function()
+                                            local inst = game:FindFirstChild(sName, true)
+                                            if inst and C.isScript(inst) then
+                                                C.enqueue(inst, "gc_debug_src"); found = found + 1
+                                            end
+                                        end)
+                                    end
+                                end
+                            end)
+                        end
+                    end
+                end
+            end)
+            if isSafe() then C.yieldNow(); if not C.memoryGuard() then break end
+            else C.tickBulk(chunk) end
+        end
+        gc = nil
+    end)
+    if found > 0 then D.UI:Log("    +"..found.." via GC closures deep", "green") end
+end
+
+-- ══════════════════════════════════
+--  v14: REGISTRY DEEP (depth 4)
+-- ══════════════════════════════════
+
+local function scanRegistryDeep()
+    if not has.getreg then return end
+    local found = 0
+    C.safeScan("RegDeep", function()
+        D.UI:Log("  → registryDeep() [v14]", "orange")
+        C.deepClean()
+        local ok, reg = C.dangerousCall("reg_deep", getreg)
+        if not ok or not reg then return end
+        local visited = {}
+        local function walkTable(tbl, depth)
+            if depth > 4 or D.S.cancel then return end
+            local tidOk, tid = pcall(tostring, tbl)
+            if not tidOk or visited[tid] then return end
+            visited[tid] = true
+            local count = 0
+            for k, v in pairs(tbl) do
+                count = count + 1; if count > 80 then break end
+                if typeof(v) == "Instance" and C.isScript(v) then
+                    C.enqueue(v, "reg_deep"); found = found + 1
+                elseif type(v) == "function" then
+                    pcall(function()
+                        local e = getfenv(v)
+                        if e then
+                            local s = rawget(e, "script")
+                            if s and typeof(s) == "Instance" and C.isScript(s) then
+                                C.enqueue(s, "reg_deep_fn"); found = found + 1
+                            end
+                        end
+                    end)
+                elseif type(v) == "table" and depth < 4 then
+                    walkTable(v, depth + 1)
+                end
+                if typeof(k) == "Instance" and C.isScript(k) then
+                    C.enqueue(k, "reg_deep_key"); found = found + 1
+                end
+            end
+        end
+        local sz = math.min(#reg, D.limits.gcLimit)
+        for i = 1, sz do
+            if D.S.cancel then break end
+            pcall(function()
+                if type(reg[i]) == "table" then walkTable(reg[i], 1)
+                elseif type(reg[i]) == "function" then
+                    pcall(function()
+                        local e = getfenv(reg[i])
+                        if e then
+                            local s = rawget(e, "script")
+                            if s and typeof(s) == "Instance" and C.isScript(s) then
+                                C.enqueue(s, "reg_deep_fn"); found = found + 1
+                            end
+                        end
+                    end)
+                end
+            end)
+            if not C.safeTick(i) then break end
+        end
+        reg = nil; visited = nil
+    end)
+    if found > 0 then D.UI:Log("    +"..found.." via registry deep", "green") end
+end
+
+-- ══════════════════════════════════
+--  v14: SIGNAL HANDLERS SCAN
+-- ══════════════════════════════════
+
+local function scanSignalHandlers()
+    if not has.getconnections then return end
+    local found = 0
+    C.safeScan("SignalHandlers", function()
+        D.UI:Log("  → signalHandlers() [v14]", "orange")
+        local svcs = {"ReplicatedStorage","StarterGui","StarterPlayer","Lighting"}
+        for _, svcName in ipairs(svcs) do
+            if D.S.cancel then break end
+            pcall(function()
+                local svc = game:GetService(svcName)
+                local ok2, desc = pcall(function() return svc:GetDescendants() end)
+                if not ok2 or not desc then return end
+                local limit = math.min(#desc, 2000)
+                for i = 1, limit do
+                    if D.S.cancel then break end
+                    pcall(function()
+                        local obj = desc[i]
+                        if not obj:IsA("ValueBase") and not obj:IsA("BindableEvent") then return end
+                        local sig
+                        if obj:IsA("ValueBase") then
+                            pcall(function() sig = obj.Changed end)
+                        elseif obj:IsA("BindableEvent") then
+                            pcall(function() sig = obj.Event end)
+                        end
+                        if not sig then return end
+                        local cOk, conns = pcall(getconnections, sig)
+                        if not cOk or not conns then return end
+                        for _, conn in ipairs(conns) do
+                            if conn.Function then
+                                pcall(function()
+                                    local e = getfenv(conn.Function)
+                                    if e then
+                                        local s = rawget(e, "script")
+                                        if s and typeof(s) == "Instance" and C.isScript(s) then
+                                            C.enqueue(s, "signal_handler"); found = found + 1
+                                        end
+                                    end
+                                end)
+                            end
+                        end
+                    end)
+                    if i % 50 == 0 then C.yieldNow() end
+                end
+                desc = nil
+            end)
+            C.yieldNow()
+        end
+    end)
+    if found > 0 then D.UI:Log("    +"..found.." via signal handlers", "green") end
+end
+
+-- ══════════════════════════════════
+--  v14: MODULE RETURN VALUES
+-- ══════════════════════════════════
+
+local function scanModuleReturns()
+    if not has.getloadedmodules then return end
+    local found = 0
+    C.safeScan("ModReturns", function()
+        D.UI:Log("  → moduleReturns() [v14]", "orange")
+        C.deepClean()
+        local ok, mods = C.dangerousCall("mod_ret", getloadedmodules)
+        if not ok or not mods then return end
+        local limit = math.min(#mods, D.limits.maxModTrace)
+        for mi, mod in ipairs(mods) do
+            if D.S.cancel or mi > limit then break end
+            pcall(function()
+                local rOk, ret = pcall(require, mod)
+                if not rOk or type(ret) ~= "table" then return end
+                local tc = 0
+                for _, v in pairs(ret) do
+                    tc = tc + 1; if tc > 40 then break end
+                    if typeof(v) == "Instance" and C.isScript(v) then
+                        C.enqueue(v, "mod_return"); found = found + 1
+                    elseif type(v) == "function" then
+                        pcall(function()
+                            local e = getfenv(v)
+                            if e then
+                                local s = rawget(e, "script")
+                                if s and typeof(s) == "Instance" and C.isScript(s) then
+                                    C.enqueue(s, "mod_ret_fn"); found = found + 1
+                                end
+                            end
+                        end)
+                    end
+                end
+            end)
+            if not C.safeTick(mi) then break end
+        end
+        mods = nil
+    end)
+    if found > 0 then D.UI:Log("    +"..found.." via module returns", "green") end
+end
+
+-- ══════════════════════════════════
+--  v14: WEAK TABLES SCAN
+-- ══════════════════════════════════
+
+local function scanWeakTables()
+    if not has.getgc or not has.getrawmetatable then return end
+    local found = 0
+    C.safeScan("WeakTables", function()
+        D.UI:Log("  → weakTables() [v14]", "orange")
+        C.deepClean()
+        local ok, gc = C.dangerousCall("gc_weak", getgc, true)
+        if not ok or not gc then return end
+        local sz = math.min(#gc, D.limits.gcLimit)
+        for i = 1, sz do
+            if D.S.cancel then break end
+            if type(gc[i]) == "table" then
+                pcall(function()
+                    local mt = getrawmetatable(gc[i])
+                    if not mt then return end
+                    local mode_val = rawget(mt, "__mode")
+                    if not mode_val then return end
+                    local tc = 0
+                    for _, v in pairs(gc[i]) do
+                        tc = tc + 1; if tc > 50 then break end
+                        if typeof(v) == "Instance" and C.isScript(v) then
+                            C.enqueue(v, "weak_tbl"); found = found + 1
+                        end
+                    end
+                end)
+            end
+            if not C.safeTick(i) then break end
+        end
+        gc = nil
+    end)
+    if found > 0 then D.UI:Log("    +"..found.." via weak tables", "green") end
+end
+
+-- ══════════════════════════════════
+--  v14: DEBUG REGISTRY
+-- ══════════════════════════════════
+
+local function scanDebugRegistry()
+    local dreg
+    pcall(function() dreg = debug.getregistry() end)
+    if not dreg or type(dreg) ~= "table" then return end
+    local found = 0
+    C.safeScan("DebugReg", function()
+        D.UI:Log("  → debugRegistry() [v14]", "orange")
+        local limit = math.min(#dreg, 5000)
+        for i = 1, limit do
+            if D.S.cancel then break end
+            pcall(function()
+                local v = dreg[i]
+                if type(v) == "function" then
+                    pcall(function()
+                        local e = getfenv(v)
+                        if e then
+                            local s = rawget(e, "script")
+                            if s and typeof(s) == "Instance" and C.isScript(s) then
+                                C.enqueue(s, "debug_reg"); found = found + 1
+                            end
+                        end
+                    end)
+                elseif type(v) == "table" then
+                    pcall(function()
+                        local tc = 0
+                        for _, v2 in pairs(v) do
+                            tc = tc + 1; if tc > 30 then break end
+                            if typeof(v2) == "Instance" and C.isScript(v2) then
+                                C.enqueue(v2, "debug_reg_tbl"); found = found + 1
+                            end
+                        end
+                    end)
+                end
+            end)
+            if not C.safeTick(i) then break end
+        end
+    end)
+    if found > 0 then D.UI:Log("    +"..found.." via debug registry", "green") end
+end
+
+-- ══════════════════════════════════
+--  ORCHESTRATOR — v14
 -- ══════════════════════════════════
 
 function M.collectAll()
     local m = mode()
     D.UI:SetPhase("collecting")
     D.UI:Log("Collecting ("..m:upper()..")...", "blue")
-    D.UI:Log("★ ALL scanners active — scanning every service in game", "blue")
+    D.UI:Log("★ v14 — ALL scanners + 6 new deep methods", "blue")
     task.wait(0.2)
 
-    -- 1. Scan EVERY service — no hardcoded list
     if not D.S.cancel then scanAllServices() end
     C.memoryGuard()
-
-    -- 2. Deep player scan
     if not D.S.cancel then scanPlayerDeep() end
     C.memoryGuard()
-
-    -- 3. Basic sources (protected)
     if not D.S.cancel then scanBasicSources() end
     C.memoryGuard()
-
-    -- 4. Nil
     if not D.S.cancel then scanNil() end
     C.memoryGuard()
-
-    -- 5. Connections
     if not D.S.cancel then scanConnScripts() end
     C.memoryGuard()
-
-    -- 6. Registry
     if not D.S.cancel then scanRegistry() end
     C.memoryGuard()
-
-    -- 7. GC
     if not D.S.cancel then scanGC() end
     C.memoryGuard()
-
-    -- 8. Instances
     if not D.S.cancel then scanInstances() end
     C.memoryGuard()
-
-    -- 9. Threads
     if not D.S.cancel then scanThreads() end
     C.memoryGuard()
 
-    -- 10. Advanced
     D.UI:Log("── Advanced Methods ──", "blue")
     task.wait(0.15)
 
     if not D.S.cancel then gcFunctionMap() end
     C.memoryGuard()
-
     if not D.S.cancel then collectionServiceScan() end
     C.memoryGuard()
-
     if not D.S.cancel then moduleRequireTrace() end
     C.memoryGuard()
-
     if not D.S.cancel then gcTableDeepScan() end
     C.memoryGuard()
-
     if not D.S.cancel then deepUpvalueChain() end
+    C.memoryGuard()
+
+    -- v14 new scanners
+    D.UI:Log("── v14 Deep Discovery ──", "blue")
+    task.wait(0.15)
+
+    if not D.S.cancel then scanGCClosuresDeep() end
+    C.memoryGuard()
+    if not D.S.cancel then scanRegistryDeep() end
+    C.memoryGuard()
+    if not D.S.cancel then scanSignalHandlers() end
+    C.memoryGuard()
+    if not D.S.cancel then scanModuleReturns() end
+    C.memoryGuard()
+    if not D.S.cancel then scanWeakTables() end
+    C.memoryGuard()
+    if not D.S.cancel then scanDebugRegistry() end
     C.memoryGuard()
 
     -- Sort: cache hits first

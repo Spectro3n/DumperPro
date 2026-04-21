@@ -9,7 +9,98 @@ C.UIS     = game:GetService("UserInputService")
 C.Tags    = game:GetService("CollectionService")
 C.LP      = C.Players.LocalPlayer
 
--- ══ MODES — all scan everything, only protection changes ══
+-- ══════════════════════════════════
+--  GAME FREEZE / UNFREEZE SYSTEM
+-- ══════════════════════════════════
+
+local frozenState = {
+    connections = {},
+    humanoids = {},
+    gravity = nil,
+    frozen = false,
+}
+
+function C.freezeGame()
+    if frozenState.frozen then return end
+    frozenState.frozen = true
+
+    -- 1. Store and set gravity
+    pcall(function() frozenState.gravity = workspace.Gravity; workspace.Gravity = 0 end)
+
+    -- 2. Freeze all humanoids
+    pcall(function()
+        for _, desc in ipairs(workspace:GetDescendants()) do
+            pcall(function()
+                if desc:IsA("Humanoid") then
+                    frozenState.humanoids[desc] = desc.WalkSpeed
+                    desc.WalkSpeed = 0
+                end
+            end)
+        end
+    end)
+
+    -- 3. Disable player controls
+    pcall(function()
+        local pGui = C.LP:FindFirstChild("PlayerGui")
+        if pGui then
+            local pm = pGui:FindFirstChild("PlayerModule")
+            if pm then
+                local ctrl = require(pm):GetControls()
+                if ctrl and ctrl.Disable then ctrl:Disable() end
+            end
+        end
+    end)
+
+    -- 4. Anchor character
+    pcall(function()
+        local char = C.LP.Character
+        if char then
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then hrp.Anchored = true end
+        end
+    end)
+end
+
+function C.unfreezeGame()
+    if not frozenState.frozen then return end
+
+    -- Restore gravity
+    pcall(function() if frozenState.gravity then workspace.Gravity = frozenState.gravity end end)
+
+    -- Restore humanoids
+    for hum, speed in pairs(frozenState.humanoids) do
+        pcall(function() hum.WalkSpeed = speed end)
+    end
+    frozenState.humanoids = {}
+
+    -- Re-enable controls
+    pcall(function()
+        local pGui = C.LP:FindFirstChild("PlayerGui")
+        if pGui then
+            local pm = pGui:FindFirstChild("PlayerModule")
+            if pm then
+                local ctrl = require(pm):GetControls()
+                if ctrl and ctrl.Enable then ctrl:Enable() end
+            end
+        end
+    end)
+
+    -- Unanchor character
+    pcall(function()
+        local char = C.LP.Character
+        if char then
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then hrp.Anchored = false end
+        end
+    end)
+
+    frozenState.frozen = false
+end
+
+-- ══════════════════════════════════
+--  MODES — v14 tuned for anti-crash
+-- ══════════════════════════════════
+
 C.MODES = {
     safe = {
         yieldEvery       = 5,
@@ -21,7 +112,7 @@ C.MODES = {
         hookDecompBudget = 10,
         maxDescendants   = 50000,
         batchSize        = 2,
-        memCheckEvery    = 8,
+        memCheckEvery    = 4,
         gcStepSize       = 40,
         chunkProcess     = 50,
         cacheHitBatch    = 8,
@@ -29,8 +120,11 @@ C.MODES = {
         maxTags          = 500,
         maxModTrace      = 600,
         logEvery         = 8,
-        dangerousWait    = 0.8,   -- wait before dangerous calls
-        dangerousTimeout = 12,    -- timeout for dangerous calls
+        dangerousWait    = 0.8,
+        dangerousTimeout = 12,
+        maxMemoryMB      = 500,
+        emergencyPauseSec= 3,
+        microBatchMax    = 4,
     },
     normal = {
         yieldEvery       = 12,
@@ -42,7 +136,7 @@ C.MODES = {
         hookDecompBudget = 25,
         maxDescendants   = 30000,
         batchSize        = 3,
-        memCheckEvery    = 15,
+        memCheckEvery    = 8,
         gcStepSize       = 100,
         chunkProcess     = 150,
         cacheHitBatch    = 20,
@@ -52,6 +146,9 @@ C.MODES = {
         logEvery         = 10,
         dangerousWait    = 0.3,
         dangerousTimeout = 8,
+        maxMemoryMB      = 550,
+        emergencyPauseSec= 3,
+        microBatchMax    = 8,
     },
     turbo = {
         yieldEvery       = 80,
@@ -62,9 +159,9 @@ C.MODES = {
         connLimit        = 30,
         hookDecompBudget = 80,
         maxDescendants   = 100000,
-        batchSize        = 12,
-        memCheckEvery    = 60,
-        gcStepSize       = 250,
+        batchSize        = 8,
+        memCheckEvery    = 15,
+        gcStepSize       = 400,
         chunkProcess     = 500,
         cacheHitBatch    = 60,
         upvalueDepth     = 7,
@@ -73,6 +170,9 @@ C.MODES = {
         logEvery         = 25,
         dangerousWait    = 0.1,
         dangerousTimeout = 5,
+        maxMemoryMB      = 550,
+        emergencyPauseSec= 3,
+        microBatchMax    = 15,
     },
 }
 
@@ -146,24 +246,76 @@ function C.resetState()
     C.ensureDir(folder)
 end
 
--- ══ MEMORY ══
+-- ══════════════════════════════════
+--  4-TIER ANTI-CRASH MEMORY SYSTEM
+-- ══════════════════════════════════
+
 function C.getMemKB()
     local ok,m = pcall(gcinfo); return ok and m or 0
 end
 
+function C.getMemMB()
+    return math.floor(C.getMemKB() / 1024)
+end
+
+function C.emergencyFlush()
+    D.UI:Log("🚨 EMERGENCY FLUSH — clearing caches", "red")
+    -- Multiple GC passes
+    for i = 1, 3 do
+        pcall(collectgarbage, "collect")
+        task.wait(0.5)
+    end
+    -- Trim bytecode cache to last 200 entries
+    local cacheCount = 0
+    local toRemove = {}
+    for k in pairs(D.cache.bytecode) do
+        cacheCount = cacheCount + 1
+        if cacheCount > 200 then toRemove[#toRemove+1] = k end
+    end
+    for _, k in ipairs(toRemove) do D.cache.bytecode[k] = nil end
+    toRemove = nil
+    pcall(collectgarbage, "collect")
+    task.wait(1)
+    D.UI:Log("  Flushed to "..C.getMemMB().."MB", "yellow")
+end
+
 function C.memoryGuard()
-    local mem = C.getMemKB()
-    if mem > 800000 then
-        pcall(collectgarbage,"collect"); task.wait(1.5)
-        mem = C.getMemKB()
-        D.UI:Log("⚠ Mem critical: "..math.floor(mem/1024).."MB","red")
-        if mem > 750000 then return false end
-    elseif mem > 500000 then
-        pcall(collectgarbage,"step", D.limits.gcStepSize * 3); task.wait(0.3)
-    elseif mem > 350000 then
-        pcall(collectgarbage,"step", D.limits.gcStepSize)
+    local memMB = C.getMemMB()
+    local maxMem = D.limits.maxMemoryMB or 550
+
+    if memMB > maxMem then
+        -- TIER 4: EMERGENCY
+        D.UI:Log("🚨 Memory CRITICAL: "..memMB.."MB — emergency flush", "red")
+        C.emergencyFlush()
+        task.wait(D.limits.emergencyPauseSec or 3)
+        memMB = C.getMemMB()
+        if memMB > maxMem - 50 then return false end
+    elseif memMB > math.floor(maxMem * 0.82) then
+        -- TIER 3: Full GC + wait
+        pcall(collectgarbage, "collect")
+        task.wait(0.5)
+        pcall(collectgarbage, "collect")
+        task.wait(0.3)
+    elseif memMB > math.floor(maxMem * 0.55) then
+        -- TIER 2: Incremental GC
+        pcall(collectgarbage, "step", (D.limits.gcStepSize or 100) * 3)
+        task.wait(0.15)
+    elseif memMB > math.floor(maxMem * 0.36) then
+        -- TIER 1: Light step
+        pcall(collectgarbage, "step", D.limits.gcStepSize or 100)
     end
     return true
+end
+
+function C.adaptiveBatchSize()
+    local memMB = C.getMemMB()
+    local maxMem = D.limits.maxMemoryMB or 550
+    local maxBatch = D.limits.microBatchMax or 8
+    local ratio = memMB / maxMem
+    if ratio > 0.85 then return 1
+    elseif ratio > 0.7 then return math.max(1, math.floor(maxBatch * 0.25))
+    elseif ratio > 0.5 then return math.max(2, math.floor(maxBatch * 0.5))
+    else return maxBatch end
 end
 
 -- Force full cleanup — use before dangerous calls
@@ -219,7 +371,7 @@ function C.safeScan(label, fn)
     return ok
 end
 
--- ══ TIMED CALL — runs function in spawned thread with timeout ══
+-- ══ TIMED CALL ══
 function C.timedCall(fn, timeout, ...)
     local args, rok, rval, done = {...}, nil, nil, false
     task.spawn(function()
@@ -234,34 +386,25 @@ function C.timedCall(fn, timeout, ...)
     return rok, rval
 end
 
--- ══ DANGEROUS CALL — max protection for functions that can crash ══
--- Memory cleanup → yield → spawned thread → pcall → timeout
+-- ══ DANGEROUS CALL ══
 function C.dangerousCall(label, fn, ...)
     D.UI:Log("    ⟐ "..label.." (protected)", "gray")
-
-    -- Step 1: clean memory
     C.deepClean()
-
-    -- Step 2: verify memory is OK
     if not C.memoryGuard() then
         D.UI:Log("    ⚠ "..label..": memory too high, cleaning harder", "yellow")
-        pcall(collectgarbage, "collect")
+        C.emergencyFlush()
         task.wait(2)
         if not C.memoryGuard() then
             D.UI:Log("    ⚠ "..label..": skipping (memory critical)", "red")
             return false, nil
         end
     end
-
-    -- Step 3: call in spawned thread with timeout
     local ok, result = C.timedCall(fn, D.limits.dangerousTimeout, ...)
-
     if not ok then
         D.UI:Log("    ⚠ "..label..": failed or timed out", "red")
         pcall(collectgarbage, "collect")
         return false, nil
     end
-
     return true, result
 end
 
@@ -378,7 +521,7 @@ function C.buildFilePath(obj)
     return folder, fileName
 end
 
--- ══ ENQUEUE — extra safety on tostring ══
+-- ══ ENQUEUE ══
 function C.enqueue(obj, from)
     local idOk, id = pcall(tostring, obj)
     if not idOk or not id then return end
@@ -419,7 +562,7 @@ function C.enqueue(obj, from)
     D.S.queue[#D.S.queue+1] = {inst=obj, from=from, bcHash=bcHash}
 end
 
--- ══ CHECK REMOTE ══
+-- ══ CHECK REMOTE — enhanced with arg analysis ══
 function C.checkRemote(obj)
     if not D.cfg.dumpRemotes then return end
     local ok,cn = pcall(function() return obj.ClassName end)
@@ -432,8 +575,9 @@ function C.checkRemote(obj)
         local info = {
             class=cn, name=obj.Name, path=C.safeName(obj),
             parent=obj.Parent and C.safeName(obj.Parent) or "nil",
-            callbacks={}, connectionCount=0,
+            callbacks={}, connectionCount=0, argInfo={},
         }
+        -- Callback analysis
         if D.has.getcallbackvalue then
             local cbNames = ({
                 BindableEvent={"Event"}, BindableFunction={"OnInvoke"},
@@ -444,13 +588,54 @@ function C.checkRemote(obj)
                 pcall(function()
                     local cb = getcallbackvalue(obj,cbN)
                     if cb then
-                        info.callbacks[#info.callbacks+1] = {
+                        local cbInfo = {
                             name=cbN,
                             type=D.has.iscclosure and (iscclosure(cb) and "C" or "Lua") or "?",
                         }
+                        -- Try to get argument info from debug.getinfo
+                        if D.has["debug.getinfo"] then
+                            pcall(function()
+                                local di = debug.getinfo(cb)
+                                if di then
+                                    cbInfo.numParams = di.numparams or di.nparams
+                                    cbInfo.isVararg = di.is_vararg or di.isvararg
+                                end
+                            end)
+                        end
+                        -- Get constants for argument type inference
+                        if D.has.getconstants then
+                            pcall(function()
+                                local consts = getconstants(cb)
+                                if consts then
+                                    local strs = {}
+                                    for _, v in ipairs(consts) do
+                                        if type(v) == "string" and #v > 0 and #v < 80 then
+                                            strs[#strs+1] = v
+                                        end
+                                    end
+                                    if #strs > 0 then cbInfo.constants = strs end
+                                end
+                            end)
+                        end
+                        info.callbacks[#info.callbacks+1] = cbInfo
                     end
                 end)
             end
+        end
+        -- Connection count via getconnections
+        if D.has.getconnections then
+            pcall(function()
+                local sig
+                if cn == "RemoteEvent" or cn == "UnreliableRemoteEvent" then
+                    sig = obj.OnClientEvent
+                elseif cn == "BindableEvent" then
+                    sig = obj.Event
+                end
+                if sig then
+                    local conns = getconnections(sig)
+                    info.connectionCount = conns and #conns or 0
+                end
+            end)
         end
         D.S.remotes[#D.S.remotes+1]=info
         D.S.stats.remotes=D.S.stats.remotes+1
@@ -458,14 +643,12 @@ function C.checkRemote(obj)
 end
 
 -- ══ PROCESS LIST — safe single-item processing ══
--- Each item: isolated pcall, never crashes the loop
 function C.processListSafe(list, from, maxCount)
     if not list or #list == 0 then return end
     local max = math.min(#list, maxCount or D.limits.maxDescendants)
     local dumpRemotes = D.cfg.dumpRemotes
     for i = 1, max do
         if D.S.cancel then return end
-        -- Double pcall: outer catches any issue with the item itself
         local itemOk = pcall(function()
             local obj = list[i]
             if not obj then return end
@@ -476,7 +659,6 @@ function C.processListSafe(list, from, maxCount)
                 pcall(function() C.checkRemote(obj) end)
             end
         end)
-        -- Always yield/check regardless of item success
         if not C.safeTick(i) then return end
     end
 end
@@ -507,7 +689,6 @@ function C.processObjList(list, from, maxCount)
             C.tickBulk(chunk)
         end
     elseif mode == "safe" then
-        -- Safe: use processListSafe (per-item double pcall)
         C.processListSafe(list, from, max)
     else
         for i = 1, max do
