@@ -454,7 +454,7 @@ function M.identifyScript(fn)
     return path, name, class
 end
 
--- ══ PROCESS ONE — v15: 16 strategies ══
+-- ══ PROCESS ONE — v15: 16 strategies, memory-aware ══
 function M.processOne(entry)
     if D.S.cancel then return end
     local obj = entry.inst
@@ -466,6 +466,14 @@ function M.processOne(entry)
 
     local source, method
 
+    -- Helper: check if we can afford heavy strategies
+    local function canDoHeavy()
+        local memMB = C.getMemMB()
+        local maxMem = D.limits.maxMemoryMB or 600
+        return memMB < math.floor(maxMem * 0.55)
+    end
+
+    -- TIER 1: Fast strategies (no getgc, no heavy ops)
     -- 1. Cache
     source, method = tryCache(obj, entry)
     -- 2. Decompile
@@ -481,31 +489,37 @@ function M.processOne(entry)
     -- 12. getscriptfunction
     if not source then pcall(function() source, method = tryGetScriptFunction(obj) end)
         if source then D.S.stats.aggressive = D.S.stats.aggressive + 1 end end
-    -- 6. Protos (recursive, unlimited)
+
+    -- TIER 2: Medium strategies (protos, constants — no getgc)
     if not source then pcall(function() source, method = tryGetProtos(obj) end)
         if source then D.S.stats.aggressive = D.S.stats.aggressive + 1 end end
-    -- 13. GC Closure Match
-    if not source then pcall(function() source, method = tryGCClosureMatch(obj) end)
-        if source then D.S.stats.aggressive = D.S.stats.aggressive + 1 end end
-    -- 14. Thread Decompile
-    if not source then pcall(function() source, method = tryThreadDecompile(obj) end)
-        if source then D.S.stats.aggressive = D.S.stats.aggressive + 1 end end
-    -- 7. Constants/Upvalues
     if not source then pcall(function() source, method = tryConstantsReconstruct(obj) end)
         if source then D.S.stats.aggressive = D.S.stats.aggressive + 1 end end
-    -- 8. Debug info stub
     if not source then pcall(function() source, method = tryDebugInfo(obj) end)
         if source then D.S.stats.aggressive = D.S.stats.aggressive + 1 end end
-    -- 9. Require force (recursive)
     if not source then pcall(function() source, method = tryRequireForce(obj) end)
         if source then D.S.stats.aggressive = D.S.stats.aggressive + 1 end end
-    -- 15. Full Reconstruction
-    if not source then pcall(function() source, method = tryFullReconstruction(obj) end)
-        if source then D.S.stats.aggressive = D.S.stats.aggressive + 1 end end
-    -- 10. Environment dump
     if not source then pcall(function() source, method = tryEnvironment(obj) end)
         if source then D.S.stats.aggressive = D.S.stats.aggressive + 1 end end
-    -- 11. Bytecode
+
+    -- TIER 3: HEAVY strategies (getgc — ONLY when memory allows)
+    if not source and canDoHeavy() then
+        pcall(function() source, method = tryGCClosureMatch(obj) end)
+        if source then D.S.stats.aggressive = D.S.stats.aggressive + 1 end
+        pcall(collectgarbage, "step", 50)
+    end
+    if not source and canDoHeavy() then
+        pcall(function() source, method = tryThreadDecompile(obj) end)
+        if source then D.S.stats.aggressive = D.S.stats.aggressive + 1 end
+        pcall(collectgarbage, "step", 50)
+    end
+    if not source and canDoHeavy() then
+        pcall(function() source, method = tryFullReconstruction(obj) end)
+        if source then D.S.stats.aggressive = D.S.stats.aggressive + 1 end
+        pcall(collectgarbage, "step", 50)
+    end
+
+    -- TIER 4: Last resort (bytecode — always safe)
     if not source then source, method = tryBytecode(obj)
         if source then D.S.stats.aggressive = D.S.stats.aggressive + 1 end end
 

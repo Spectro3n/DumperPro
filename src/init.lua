@@ -60,25 +60,76 @@ local function onDone()
 end
 
 -- ══════════════════════════════════
---  v14: ANTI-CRASH PROCESSING LOOP
---  Micro-batch + adaptive throttle + emergency flush
+--  v15: CRASH-PROOF PROCESSING LOOP
+--  Progressive save + auto-downgrade + per-script GC
+--  Survives 14k+ scripts without crashing
 -- ══════════════════════════════════
+
+local function progressiveSave()
+    -- Save what we have so far — protects against crash
+    pcall(function()
+        if D.Output and D.Output.saveAll then
+            D.Output.saveAll()
+        end
+    end)
+end
 
 local function startProcessing()
     D.UI:SetPhase("decompiling")
     D.UI:Log("Processing "..#D.S.queue.." scripts...", "blue")
+    D.UI:Log("  ⚡ Progressive save enabled — partial results saved every batch", "green")
 
     local mode = D.cfg.mode or "normal"
     local gcStep = D.limits.gcStepSize
     local logEvery = D.limits.logEvery
-    local memCheckEvery = D.limits.memCheckEvery
+    local saveEvery = 50 -- Progressive save interval
+    local lastSave = 0
+    local downgraded = false
 
     processingThread = task.spawn(function()
         local processed = 0
 
         while #D.S.queue > 0 and not D.S.cancel do
-            -- Adaptive batch: shrinks as memory grows
-            local batchCount = C.adaptiveBatchSize()
+            -- Memory check BEFORE every batch
+            local memMB = C.getMemMB()
+            local maxMem = D.limits.maxMemoryMB or 600
+
+            -- HARD CEILING: if over 90% of max, save everything and do emergency cleanup
+            if memMB > math.floor(maxMem * 0.90) then
+                D.UI:Log("🚨 Memory "..memMB.."MB/"..maxMem.."MB — EMERGENCY SAVE + FLUSH", "red")
+                progressiveSave()
+                C.emergencyFlush()
+                task.wait(D.limits.emergencyPauseSec or 2)
+                pcall(collectgarbage, "collect")
+                task.wait(1)
+                memMB = C.getMemMB()
+                if memMB > math.floor(maxMem * 0.85) then
+                    D.UI:Log("🚨 Memory still "..memMB.."MB — saving and stopping to prevent crash", "red")
+                    D.S.cancel = true
+                    break
+                end
+                D.UI:Log("  ✓ Recovered to "..memMB.."MB — continuing", "yellow")
+            end
+
+            -- AUTO-DOWNGRADE: if over 70%, reduce aggressiveness
+            if not downgraded and memMB > math.floor(maxMem * 0.70) then
+                D.UI:Log("⚠ Memory "..memMB.."MB — auto-downgrading to safe parameters", "yellow")
+                downgraded = true
+                -- Force safe-like parameters
+                D.limits.microBatchMax = 2
+                D.limits.yieldEvery = 5
+                D.limits.decompileTimeout = math.min(D.limits.decompileTimeout, 10)
+                gcStep = 30
+                saveEvery = 25
+            end
+
+            -- Adaptive batch: 1 script at a time when memory is high
+            local batchCount
+            if memMB > math.floor(maxMem * 0.60) then
+                batchCount = 1
+            else
+                batchCount = C.adaptiveBatchSize()
+            end
 
             for b = 1, batchCount do
                 if #D.S.queue == 0 or D.S.cancel then break end
@@ -97,14 +148,19 @@ local function startProcessing()
 
                 -- Progress logging
                 if processed % logEvery == 0 then
-                    D.UI:Log(string.format("  %d/%d (%d cached, %d fail) mem:%dMB %s",
-                        D.S.stats.ok+D.S.stats.fail, D.S.stats.queued,
-                        D.S.cacheStats.hits, D.S.stats.fail,
+                    D.UI:Log(string.format("  %d/%d (%d ok, %d fail) mem:%dMB %s",
+                        processed, D.S.stats.queued,
+                        D.S.stats.ok, D.S.stats.fail,
                         C.getMemMB(), C.elapsed()), "gray")
                 end
 
                 -- Nil out entry reference immediately
                 entry = nil
+
+                -- GC step after EVERY script when memory is above 50%
+                if C.getMemMB() > math.floor(maxMem * 0.50) then
+                    pcall(collectgarbage, "step", gcStep)
+                end
             end
 
             -- ALWAYS yield after every micro-batch
@@ -113,19 +169,29 @@ local function startProcessing()
             -- Incremental GC every batch
             pcall(collectgarbage, "step", gcStep)
 
-            -- Full memory check periodically
-            if processed % memCheckEvery == 0 then
+            -- Progressive save — save partial results periodically
+            if processed - lastSave >= saveEvery then
+                lastSave = processed
+                pcall(function()
+                    D.UI:Log("  💾 Progressive save at "..processed.."/"..D.S.stats.queued.." (mem:"..C.getMemMB().."MB)", "blue")
+                    progressiveSave()
+                    -- Extra GC after save
+                    pcall(collectgarbage, "collect")
+                    task.wait(0.2)
+                end)
+            end
+
+            -- Memory guard
+            if not C.memoryGuard() then
+                D.UI:Log("🚨 Memory critical — emergency save + flush", "red")
+                progressiveSave()
+                C.emergencyFlush()
+                task.wait(D.limits.emergencyPauseSec or 2)
                 if not C.memoryGuard() then
-                    -- Emergency: pause, flush, retry
-                    D.UI:Log("🚨 Memory critical at "..processed.."/"..D.S.stats.queued.." — emergency pause", "red")
-                    C.emergencyFlush()
-                    task.wait(D.limits.emergencyPauseSec or 3)
-                    if not C.memoryGuard() then
-                        D.UI:Log("🚨 Still critical — saving and stopping", "red")
-                        D.S.cancel = true
-                    else
-                        D.UI:Log("  Memory recovered: "..C.getMemMB().."MB — resuming", "yellow")
-                    end
+                    D.UI:Log("🚨 Still critical — saved "..D.S.stats.ok.." scripts, stopping", "red")
+                    D.S.cancel = true
+                else
+                    D.UI:Log("  Memory recovered: "..C.getMemMB().."MB — resuming", "yellow")
                 end
             end
         end
