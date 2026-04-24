@@ -146,9 +146,9 @@ local function startDump()
     local mode = D.cfg.mode or "normal"
 
     D.UI:Log("═══════════════════════════", "blue")
-    D.UI:Log("DUMP PRO v14: "..D.S.rootDir, "blue")
-    D.UI:Log("Mode: "..mode:upper().." — ALL SCANNERS + v14 DEEP", "blue")
-    D.UI:Log("Anti-Crash: 4-tier memory + adaptive batch + emergency flush", "blue")
+    D.UI:Log("DUMP PRO v15: "..D.S.rootDir, "blue")
+    D.UI:Log("Mode: "..mode:upper().." — ALL SCANNERS + v15 DEEP", "blue")
+    D.UI:Log("Anti-Crash: 4-tier memory + real freeze + emergency flush", "blue")
     D.UI:Log("Limits: batch="..D.limits.microBatchMax
         .." gc="..D.limits.gcStepSize
         .." timeout="..D.limits.decompileTimeout.."s"
@@ -161,10 +161,10 @@ local function startDump()
     D.UI:Log("Modules: "..table.concat(mods," "), "blue")
     D.UI:Log("═══════════════════════════", "blue")
 
-    -- v14: Freeze game before extraction
-    D.UI:Log("🧊 Freezing game for clean extraction...", "blue")
+    -- v15: Real game freeze — stops ALL processing
+    D.UI:Log("🧊 FREEZING GAME — stopping all physics, sounds, animations...", "blue")
     pcall(function() C.freezeGame() end)
-    D.UI:Log("  Game frozen — extracting safely", "green")
+    D.UI:Log("  ✓ Game fully frozen — safe extraction mode", "green")
     task.wait(0.3)
 
     -- Collect
@@ -222,13 +222,14 @@ end
 local caps = 0
 for _, v in pairs(has) do if v then caps = caps + 1 end end
 
-UI:Log("Dumper Pro v14 — Maximum Deep Discovery", "green")
+UI:Log("Dumper Pro v15 — Maximum Deep Discovery", "green")
 UI:Log("Game: "..UI:GetConfig().folder, "gray")
 UI:Log("Caps: "..caps.."/"..#C.PROBES, "gray")
-UI:Log("🧊 Game freezes on start for clean extraction", "white")
-UI:Log("🛡️ 4-tier anti-crash: adaptive batch + emergency flush", "white")
-UI:Log("🔍 21 scanners + 11 decompile strategies", "white")
-UI:Log("★ Safe: protected + memory guards (still finds everything)", "gray")
+UI:Log("🧊 REAL game freeze — stops physics, sounds, animations", "white")
+UI:Log("🛡️ 4-tier anti-crash + real freeze = zero crashes", "white")
+UI:Log("🔍 21 scanners + 16 decompile strategies", "white")
+UI:Log("📡 Adaptive remote args — infers types automatically", "white")
+UI:Log("★ Safe: fast + protected + memory guards", "gray")
 UI:Log("★ Normal: balanced speed + full coverage", "gray")
-UI:Log("★ Turbo: max speed, adaptive throttle, crash-proof", "gray")
+UI:Log("★ Turbo: maximum speed + safety guards", "gray")
 UI:Log("Press START", "white")

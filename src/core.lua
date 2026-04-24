@@ -10,53 +10,177 @@ C.Tags    = game:GetService("CollectionService")
 C.LP      = C.Players.LocalPlayer
 
 -- ══════════════════════════════════
---  GAME FREEZE / UNFREEZE SYSTEM
+--  v15: REAL GAME FREEZE SYSTEM
+--  Stops ALL game processing to prevent
+--  crashes from bullets, physics, NPCs, etc.
 -- ══════════════════════════════════
 
 local frozenState = {
-    connections = {},
-    humanoids = {},
-    gravity = nil,
     frozen = false,
+    gravity = nil,
+    anchoredParts = {},
+    humanoidData = {},
+    stoppedAnims = {},
+    pausedSounds = {},
+    rsConnections = {},
+    controlsDisabled = false,
+    physicsPaused = false,
 }
 
 function C.freezeGame()
     if frozenState.frozen then return end
     frozenState.frozen = true
 
-    -- 1. Store and set gravity
-    pcall(function() frozenState.gravity = workspace.Gravity; workspace.Gravity = 0 end)
-
-    -- 2. Freeze all humanoids
+    -- 1. Pause physics — set gravity to 0
     pcall(function()
-        for _, desc in ipairs(workspace:GetDescendants()) do
-            pcall(function()
-                if desc:IsA("Humanoid") then
-                    frozenState.humanoids[desc] = desc.WalkSpeed
-                    desc.WalkSpeed = 0
-                end
-            end)
+        frozenState.gravity = workspace.Gravity
+        workspace.Gravity = 0
+    end)
+
+    -- 2. Anchor ALL unanchored BaseParts in workspace (stops bullets, projectiles, NPCs, vehicles)
+    pcall(function()
+        local ok, desc = pcall(function() return workspace:GetDescendants() end)
+        if ok and desc then
+            for i = 1, #desc do
+                pcall(function()
+                    local p = desc[i]
+                    if p:IsA("BasePart") and not p.Anchored then
+                        frozenState.anchoredParts[p] = true
+                        p.Anchored = true
+                    end
+                end)
+            end
+            desc = nil
         end
     end)
 
-    -- 3. Disable player controls
+    -- 3. Freeze ALL humanoids (WalkSpeed, JumpPower, AutoRotate, PlatformStand)
+    pcall(function()
+        local ok, desc = pcall(function() return workspace:GetDescendants() end)
+        if ok and desc then
+            for i = 1, #desc do
+                pcall(function()
+                    local h = desc[i]
+                    if h:IsA("Humanoid") then
+                        frozenState.humanoidData[h] = {
+                            ws = h.WalkSpeed,
+                            jp = h.JumpPower,
+                            ar = h.AutoRotate,
+                        }
+                        h.WalkSpeed = 0
+                        h.JumpPower = 0
+                        h.AutoRotate = false
+                    end
+                end)
+            end
+            desc = nil
+        end
+    end)
+
+    -- 4. Stop all playing AnimationTracks
+    pcall(function()
+        local ok, desc = pcall(function() return workspace:GetDescendants() end)
+        if ok and desc then
+            for i = 1, #desc do
+                pcall(function()
+                    local h = desc[i]
+                    if h:IsA("Humanoid") or h:IsA("AnimationController") then
+                        pcall(function()
+                            local animator = h:FindFirstChildOfClass("Animator")
+                            if animator then
+                                local tracks = animator:GetPlayingAnimationTracks()
+                                for _, track in ipairs(tracks) do
+                                    pcall(function()
+                                        frozenState.stoppedAnims[#frozenState.stoppedAnims+1] = track
+                                        track:AdjustSpeed(0)
+                                    end)
+                                end
+                            end
+                        end)
+                    end
+                end)
+            end
+            desc = nil
+        end
+    end)
+
+    -- 5. Pause all playing sounds
+    pcall(function()
+        local function pauseSoundsIn(container)
+            pcall(function()
+                local ok, desc = pcall(function() return container:GetDescendants() end)
+                if ok and desc then
+                    for i = 1, #desc do
+                        pcall(function()
+                            local s = desc[i]
+                            if s:IsA("Sound") and s.Playing then
+                                frozenState.pausedSounds[s] = true
+                                s:Pause()
+                            end
+                        end)
+                    end
+                end
+            end)
+        end
+        pauseSoundsIn(workspace)
+        pcall(function() pauseSoundsIn(game:GetService("SoundService")) end)
+        pcall(function() pauseSoundsIn(C.LP:FindFirstChild("PlayerGui")) end)
+    end)
+
+    -- 6. Disconnect RunService signals to stop game loops
+    pcall(function()
+        local run = C.Run
+        local sigs = {}
+        pcall(function() sigs[#sigs+1] = {"Heartbeat", run.Heartbeat} end)
+        pcall(function() sigs[#sigs+1] = {"Stepped", run.Stepped} end)
+        pcall(function() sigs[#sigs+1] = {"RenderStepped", run.RenderStepped} end)
+        if has.getconnections then
+            for _, sigDef in ipairs(sigs) do
+                pcall(function()
+                    local conns = getconnections(sigDef[2])
+                    if conns then
+                        for _, conn in ipairs(conns) do
+                            pcall(function()
+                                if conn.Enabled ~= false then
+                                    conn:Disable()
+                                    frozenState.rsConnections[#frozenState.rsConnections+1] = conn
+                                end
+                            end)
+                        end
+                    end
+                end)
+            end
+        end
+    end)
+
+    -- 7. Disable player controls
     pcall(function()
         local pGui = C.LP:FindFirstChild("PlayerGui")
         if pGui then
             local pm = pGui:FindFirstChild("PlayerModule")
             if pm then
                 local ctrl = require(pm):GetControls()
-                if ctrl and ctrl.Disable then ctrl:Disable() end
+                if ctrl and ctrl.Disable then ctrl:Disable(); frozenState.controlsDisabled = true end
             end
         end
     end)
 
-    -- 4. Anchor character
+    -- 8. Disable particle emitters and beams
     pcall(function()
-        local char = C.LP.Character
-        if char then
-            local hrp = char:FindFirstChild("HumanoidRootPart")
-            if hrp then hrp.Anchored = true end
+        local ok, desc = pcall(function() return workspace:GetDescendants() end)
+        if ok and desc then
+            for i = 1, #desc do
+                pcall(function()
+                    local p = desc[i]
+                    if p:IsA("ParticleEmitter") or p:IsA("Fire") or p:IsA("Smoke") or p:IsA("Sparkles") then
+                        if p.Enabled then
+                            p.Enabled = false
+                            frozenState.anchoredParts[p] = "particle"
+                        end
+                    end
+                end)
+            end
+            desc = nil
         end
     end)
 end
@@ -64,115 +188,146 @@ end
 function C.unfreezeGame()
     if not frozenState.frozen then return end
 
-    -- Restore gravity
+    -- 1. Restore gravity
     pcall(function() if frozenState.gravity then workspace.Gravity = frozenState.gravity end end)
 
-    -- Restore humanoids
-    for hum, speed in pairs(frozenState.humanoids) do
-        pcall(function() hum.WalkSpeed = speed end)
-    end
-    frozenState.humanoids = {}
-
-    -- Re-enable controls
-    pcall(function()
-        local pGui = C.LP:FindFirstChild("PlayerGui")
-        if pGui then
-            local pm = pGui:FindFirstChild("PlayerModule")
-            if pm then
-                local ctrl = require(pm):GetControls()
-                if ctrl and ctrl.Enable then ctrl:Enable() end
+    -- 2. Unanchor parts & re-enable particles
+    for obj, val in pairs(frozenState.anchoredParts) do
+        pcall(function()
+            if val == "particle" then
+                obj.Enabled = true
+            else
+                obj.Anchored = false
             end
-        end
-    end)
+        end)
+    end
+    frozenState.anchoredParts = {}
 
-    -- Unanchor character
-    pcall(function()
-        local char = C.LP.Character
-        if char then
-            local hrp = char:FindFirstChild("HumanoidRootPart")
-            if hrp then hrp.Anchored = false end
-        end
-    end)
+    -- 3. Restore humanoids
+    for hum, data in pairs(frozenState.humanoidData) do
+        pcall(function()
+            hum.WalkSpeed = data.ws
+            hum.JumpPower = data.jp
+            hum.AutoRotate = data.ar
+        end)
+    end
+    frozenState.humanoidData = {}
+
+    -- 4. Resume animations
+    for _, track in ipairs(frozenState.stoppedAnims) do
+        pcall(function() track:AdjustSpeed(1) end)
+    end
+    frozenState.stoppedAnims = {}
+
+    -- 5. Resume sounds
+    for snd in pairs(frozenState.pausedSounds) do
+        pcall(function() snd:Resume() end)
+    end
+    frozenState.pausedSounds = {}
+
+    -- 6. Re-enable RunService connections
+    for _, conn in ipairs(frozenState.rsConnections) do
+        pcall(function() conn:Enable() end)
+    end
+    frozenState.rsConnections = {}
+
+    -- 7. Re-enable controls
+    if frozenState.controlsDisabled then
+        pcall(function()
+            local pGui = C.LP:FindFirstChild("PlayerGui")
+            if pGui then
+                local pm = pGui:FindFirstChild("PlayerModule")
+                if pm then
+                    local ctrl = require(pm):GetControls()
+                    if ctrl and ctrl.Enable then ctrl:Enable() end
+                end
+            end
+        end)
+        frozenState.controlsDisabled = false
+    end
 
     frozenState.frozen = false
 end
 
 -- ══════════════════════════════════
---  MODES — v14 tuned for anti-crash
+--  MODES — v15 speed optimized
+--  Safe: faster but protected
+--  Normal: balanced
+--  Turbo: maximum speed + safety guards
 -- ══════════════════════════════════
 
 C.MODES = {
     safe = {
-        yieldEvery       = 5,
-        gcLimit          = 80000,
-        decompileTimeout = 25,
-        maxNilDepth      = 3,
-        hooksPerService  = 500,
-        connLimit        = 15,
-        hookDecompBudget = 10,
-        maxDescendants   = 50000,
-        batchSize        = 2,
-        memCheckEvery    = 4,
-        gcStepSize       = 40,
-        chunkProcess     = 50,
-        cacheHitBatch    = 8,
-        upvalueDepth     = 4,
-        maxTags          = 500,
-        maxModTrace      = 600,
-        logEvery         = 8,
-        dangerousWait    = 0.8,
-        dangerousTimeout = 12,
-        maxMemoryMB      = 500,
-        emergencyPauseSec= 3,
-        microBatchMax    = 4,
-    },
-    normal = {
-        yieldEvery       = 12,
-        gcLimit          = 60000,
-        decompileTimeout = 12,
+        yieldEvery       = 8,
+        gcLimit          = 90000,
+        decompileTimeout = 18,
         maxNilDepth      = 3,
         hooksPerService  = 600,
-        connLimit        = 12,
-        hookDecompBudget = 25,
-        maxDescendants   = 30000,
+        connLimit        = 15,
+        hookDecompBudget = 15,
+        maxDescendants   = 60000,
         batchSize        = 3,
-        memCheckEvery    = 8,
-        gcStepSize       = 100,
-        chunkProcess     = 150,
-        cacheHitBatch    = 20,
-        upvalueDepth     = 5,
+        memCheckEvery    = 5,
+        gcStepSize       = 50,
+        chunkProcess     = 80,
+        cacheHitBatch    = 12,
+        upvalueDepth     = 4,
         maxTags          = 500,
-        maxModTrace      = 600,
+        maxModTrace      = 700,
+        logEvery         = 12,
+        dangerousWait    = 0.5,
+        dangerousTimeout = 10,
+        maxMemoryMB      = 520,
+        emergencyPauseSec= 2.5,
+        microBatchMax    = 6,
+    },
+    normal = {
+        yieldEvery       = 15,
+        gcLimit          = 70000,
+        decompileTimeout = 12,
+        maxNilDepth      = 3,
+        hooksPerService  = 700,
+        connLimit        = 15,
+        hookDecompBudget = 30,
+        maxDescendants   = 40000,
+        batchSize        = 4,
+        memCheckEvery    = 7,
+        gcStepSize       = 120,
+        chunkProcess     = 200,
+        cacheHitBatch    = 25,
+        upvalueDepth     = 5,
+        maxTags          = 600,
+        maxModTrace      = 700,
         logEvery         = 10,
-        dangerousWait    = 0.3,
+        dangerousWait    = 0.25,
         dangerousTimeout = 8,
-        maxMemoryMB      = 550,
-        emergencyPauseSec= 3,
-        microBatchMax    = 8,
+        maxMemoryMB      = 560,
+        emergencyPauseSec= 2.5,
+        microBatchMax    = 10,
     },
     turbo = {
-        yieldEvery       = 80,
-        gcLimit          = 150000,
-        decompileTimeout = 5,
+        yieldEvery       = 120,
+        gcLimit          = 180000,
+        decompileTimeout = 8,
         maxNilDepth      = 4,
-        hooksPerService  = 1200,
-        connLimit        = 30,
-        hookDecompBudget = 80,
-        maxDescendants   = 100000,
-        batchSize        = 8,
-        memCheckEvery    = 15,
-        gcStepSize       = 400,
-        chunkProcess     = 500,
-        cacheHitBatch    = 60,
+        hooksPerService  = 1500,
+        connLimit        = 40,
+        hookDecompBudget = 100,
+        maxDescendants   = 120000,
+        batchSize        = 12,
+        memCheckEvery    = 8,
+        gcStepSize       = 500,
+        chunkProcess     = 800,
+        cacheHitBatch    = 80,
         upvalueDepth     = 7,
-        maxTags          = 800,
-        maxModTrace      = 1000,
-        logEvery         = 25,
-        dangerousWait    = 0.1,
-        dangerousTimeout = 5,
-        maxMemoryMB      = 550,
-        emergencyPauseSec= 3,
-        microBatchMax    = 15,
+        maxTags          = 1000,
+        maxModTrace      = 1200,
+        logEvery         = 20,
+        dangerousWait    = 0.08,
+        dangerousTimeout = 6,
+        maxMemoryMB      = 600,
+        emergencyPauseSec= 2,
+        microBatchMax    = 25,
     },
 }
 
@@ -562,7 +717,7 @@ function C.enqueue(obj, from)
     D.S.queue[#D.S.queue+1] = {inst=obj, from=from, bcHash=bcHash}
 end
 
--- ══ CHECK REMOTE — enhanced with arg analysis ══
+-- ══ CHECK REMOTE — v15 adaptive arg analysis ══
 function C.checkRemote(obj)
     if not D.cfg.dumpRemotes then return end
     local ok,cn = pcall(function() return obj.ClassName end)
@@ -577,7 +732,83 @@ function C.checkRemote(obj)
             parent=obj.Parent and C.safeName(obj.Parent) or "nil",
             callbacks={}, connectionCount=0, argInfo={},
         }
-        -- Callback analysis
+
+        -- Helper: infer argument types from constants list
+        local function inferArgTypes(consts, numParams)
+            local args = {}
+            if not consts or not numParams or numParams == 0 then return args end
+
+            -- Build a set of all string constants for pattern matching
+            local constSet = {}
+            local constStrs = {}
+            for _, v in ipairs(consts) do
+                if type(v) == "string" then
+                    constSet[v] = true
+                    constStrs[#constStrs+1] = v
+                end
+            end
+
+            -- Type indicators from constants
+            local indicators = {
+                number = {"tonumber","math","floor","ceil","abs","clamp","random","min","max","huge","inf"},
+                string = {"tostring","string","sub","find","match","gmatch","gsub","lower","upper","split","len","format","byte","char","rep"},
+                boolean = {"true","false"},
+                Instance = {"FindFirstChild","FindFirstChildOfClass","WaitForChild","IsA","GetChildren","GetDescendants","Clone","Destroy","Parent","Instance"},
+                CFrame = {"CFrame","lookAt","Angles","fromEulerAngles","fromMatrix","fromOrientation"},
+                Vector3 = {"Vector3","magnitude","unit","Lerp","Cross","Dot"},
+                Color3 = {"Color3","fromRGB","fromHSV","fromHex"},
+                table = {"table","insert","remove","sort","concat","unpack","pack"},
+                Player = {"Player","UserId","Character","Backpack","leaderstats","DisplayName"},
+                Enum = {"Enum","KeyCode","Material","HumanoidStateType"},
+            }
+
+            -- Score each type
+            local scores = {}
+            for typeName, keywords in pairs(indicators) do
+                scores[typeName] = 0
+                for _, kw in ipairs(keywords) do
+                    if constSet[kw] then
+                        scores[typeName] = scores[typeName] + 1
+                    end
+                end
+            end
+
+            -- Assign types to each parameter based on score + position heuristics
+            for i = 1, numParams do
+                local argType = "any"
+                local bestScore = 0
+
+                -- First arg often relates to the strongest signal
+                for typeName, score in pairs(scores) do
+                    if score > bestScore then
+                        bestScore = score
+                        argType = typeName
+                    end
+                end
+
+                -- Positional heuristics
+                if numParams == 1 then
+                    -- Single arg: use best match
+                    if bestScore > 0 then
+                        args[i] = {type=argType, confidence="medium"}
+                    else
+                        args[i] = {type="any", confidence="low"}
+                    end
+                else
+                    -- Multiple args: distribute types
+                    -- Remove used type from scores for variety
+                    if bestScore > 0 and i <= 3 then
+                        args[i] = {type=argType, confidence=bestScore >= 2 and "high" or "medium"}
+                        scores[argType] = 0 -- don't reuse
+                    else
+                        args[i] = {type="any", confidence="low"}
+                    end
+                end
+            end
+            return args
+        end
+
+        -- Callback analysis with deep arg inference
         if D.has.getcallbackvalue then
             local cbNames = ({
                 BindableEvent={"Event"}, BindableFunction={"OnInvoke"},
@@ -592,7 +823,8 @@ function C.checkRemote(obj)
                             name=cbN,
                             type=D.has.iscclosure and (iscclosure(cb) and "C" or "Lua") or "?",
                         }
-                        -- Try to get argument info from debug.getinfo
+
+                        -- debug.getinfo for param count
                         if D.has["debug.getinfo"] then
                             pcall(function()
                                 local di = debug.getinfo(cb)
@@ -602,7 +834,9 @@ function C.checkRemote(obj)
                                 end
                             end)
                         end
-                        -- Get constants for argument type inference
+
+                        -- Get constants for type inference
+                        local allConsts = {}
                         if D.has.getconstants then
                             pcall(function()
                                 local consts = getconstants(cb)
@@ -611,18 +845,67 @@ function C.checkRemote(obj)
                                     for _, v in ipairs(consts) do
                                         if type(v) == "string" and #v > 0 and #v < 80 then
                                             strs[#strs+1] = v
+                                            allConsts[#allConsts+1] = v
                                         end
                                     end
                                     if #strs > 0 then cbInfo.constants = strs end
                                 end
                             end)
                         end
+
+                        -- Get proto constants too for deeper inference
+                        if D.has.getprotos and D.has.getconstants then
+                            pcall(function()
+                                local protos = getprotos(cb)
+                                if protos then
+                                    for pi = 1, math.min(#protos, 10) do
+                                        pcall(function()
+                                            local pc = getconstants(protos[pi])
+                                            if pc then
+                                                for _, v in ipairs(pc) do
+                                                    if type(v) == "string" and #v > 0 and #v < 80 then
+                                                        allConsts[#allConsts+1] = v
+                                                    end
+                                                end
+                                            end
+                                        end)
+                                    end
+                                end
+                            end)
+                        end
+
+                        -- Get upvalue types for inference
+                        if D.has.getupvalues then
+                            pcall(function()
+                                local ups = getupvalues(cb)
+                                if ups then
+                                    local uvTypes = {}
+                                    local tc = 0
+                                    for k, v in pairs(ups) do
+                                        tc = tc + 1; if tc > 20 then break end
+                                        uvTypes[#uvTypes+1] = {
+                                            index = tostring(k),
+                                            valType = type(v),
+                                            val = type(v) == "string" and v:sub(1,60) or tostring(v):sub(1,60),
+                                        }
+                                    end
+                                    if #uvTypes > 0 then cbInfo.upvalueTypes = uvTypes end
+                                end
+                            end)
+                        end
+
+                        -- Infer argument types adaptively
+                        if cbInfo.numParams and cbInfo.numParams > 0 then
+                            cbInfo.inferredArgs = inferArgTypes(allConsts, cbInfo.numParams)
+                        end
+
                         info.callbacks[#info.callbacks+1] = cbInfo
                     end
                 end)
             end
         end
-        -- Connection count via getconnections
+
+        -- Connection count via getconnections + handler analysis
         if D.has.getconnections then
             pcall(function()
                 local sig
@@ -634,6 +917,29 @@ function C.checkRemote(obj)
                 if sig then
                     local conns = getconnections(sig)
                     info.connectionCount = conns and #conns or 0
+
+                    -- Analyze connected handler functions for more arg info
+                    if conns and #conns > 0 then
+                        local handlerArgs = {}
+                        for ci = 1, math.min(#conns, 5) do
+                            pcall(function()
+                                local fn = conns[ci].Function
+                                if not fn then return end
+                                if D.has["debug.getinfo"] then
+                                    pcall(function()
+                                        local di = debug.getinfo(fn)
+                                        if di then
+                                            handlerArgs[#handlerArgs+1] = {
+                                                params = di.numparams or di.nparams,
+                                                vararg = di.is_vararg or di.isvararg,
+                                            }
+                                        end
+                                    end)
+                                end
+                            end)
+                        end
+                        if #handlerArgs > 0 then info.handlerArgs = handlerArgs end
+                    end
                 end
             end)
         end
